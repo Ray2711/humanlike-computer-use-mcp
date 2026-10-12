@@ -31,6 +31,7 @@ max_retries_per_step: 3
 stuck_threshold: 3              # same screen signature after this many actions -> escalate
 screenshot_max_width: 1280
 poll_max_width: 640             # smaller screenshots while polling during waits
+image_limited: no               # yes if the provider caps images per request (abliteration.ai: 4); see SKILL.md "Image budget"
 max_wait_chunk_s: 30            # longest single `wait` call (30-60); check STOP between chunks
 max_wait_per_tick_s: 120        # longer waits end the tick and resume on a later tick
 ```

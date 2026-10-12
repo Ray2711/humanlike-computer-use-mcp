@@ -42,6 +42,9 @@ EXPECTED_TOOLS = {
     "reset_config",
     "list_presets",
     "use_preset",
+    "calibrate",
+    "calibrate_submit",
+    "reset_image_budget",
 }
 ROOT = Path(__file__).resolve().parents[1]
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -70,6 +73,11 @@ def structured(result: Any) -> dict[str, Any]:
         data = result.structured_content
         return data.get("result", data) if set(data) == {"result"} else data
     return json.loads(result.content[0].text)
+
+
+def shot_meta(text: str) -> dict[str, Any]:
+    """JSON metadata that follows the plain-text header lines of a screenshot result."""
+    return json.loads(text[text.index("\n{") + 1 :])
 
 
 def test_all_tools_listed() -> None:
@@ -186,18 +194,28 @@ def test_screen_tools_in_process(fake_runtime) -> None:
     size = structured(call("get_screen_size"))
     assert size["width"] > 0 and size["height"] > 0 and size["monitors"]
     result = call("screenshot", {"max_width": 320})
+    assert result.structured_content is None
     meta, image = result.content
     assert image.type == "image" and image.mime_type == "image/png"
     assert base64.b64decode(image.data).startswith(PNG_MAGIC)
-    info = json.loads(meta.text)
+    info = shot_meta(meta.text)
     assert info["image_width"] == 320 and info["scale"] >= 1
     assert info["image_size"] == f"320x{info['image_height']}"
     assert info["screen_resolution"] == f"{info['region']['width']}x{info['region']['height']}"
     assert info["cursor_screen"] == [400, 400]
     assert "cursor_screenshot" in info
+    assert info["coordinate_space"] == "screenshot"
+    assert info["valid_range"] == {"x": [0, 319], "y": [0, info["image_height"] - 1]}
+    first = meta.text.splitlines()[0]
+    assert first.startswith(f"Screenshot 320x{info['image_height']} of a {info['screen_resolution']} screen")
+    assert f"x 0..319, y 0..{info['image_height'] - 1}" in first
     assert size["resolution"] == f"{size['width']}x{size['height']}"
-    default = json.loads(call("screenshot").content[0].text)
+    default = shot_meta(call("screenshot").content[0].text)
     assert default["image_width"] <= server.DEFAULT_SCREENSHOT_WIDTH
+    full = shot_meta(call("screenshot", {"max_width": 0, "format": "jpeg", "quality": 30}).content[0].text)
+    assert full["image_size"] == full["screen_resolution"] and full["scale"] == 1
+    with pytest.raises(ToolError, match="max_width"):
+        call("screenshot", {"max_width": 10})
     jpeg = call("screenshot", {"monitor": 1, "format": "jpeg", "max_width": 200}).content[1]
     assert jpeg.mime_type == "image/jpeg"
     with pytest.raises(ToolError, match="monitor"):
@@ -255,6 +273,25 @@ def test_cursor_position_reports_both_spaces(fake_runtime) -> None:
     assert structured(call("get_cursor_position"))["screenshot"] is None
 
 
+def test_metadata_only_screenshot_keeps_reference(fake_runtime) -> None:
+    rt, _, _ = fake_runtime
+    content = call("screenshot", {"image": False}).content
+    assert len(content) == 1 and content[0].type == "text"
+    assert content[0].text.startswith("No image captured")
+    info = shot_meta(content[0].text)
+    assert info["image"] is None and info["reference_image_size"] is None
+    assert info["cursor_screen"] == [400, 400] and info["cursor_screenshot"] is None
+    _set_view(rt)
+    text = call("screenshot", {"image": False, "max_width": 200}).content[0].text
+    assert "last 1280x720 screenshot" in text.splitlines()[0]
+    info = shot_meta(text)
+    assert info["reference_image_size"] == "1280x720" and info["cursor_screenshot"] == [200, 200]
+    assert info["cursor_normalized"] == [156, 278]
+    assert rt.view == screen.View(screen.Bounds(0, 0, 2560, 1440), 1280, 720)
+    with pytest.raises(ToolError, match="monitor"):
+        call("screenshot", {"image": False, "monitor": 99})
+
+
 def test_view_mapping_roundtrip() -> None:
     view = screen.View(screen.Bounds(-1920, 0, 1920, 1080), 1280, 720)
     for ix, iy in [(0, 0), (639, 359), (1279, 719)]:
@@ -262,6 +299,164 @@ def test_view_mapping_roundtrip() -> None:
         assert view.to_image(sx, sy) == (ix, iy)
     assert view.to_image(0, 0) is None
     assert view.to_screen(1279, 719) == (-1, 1079)
+
+
+def test_normalized_mapping_roundtrip() -> None:
+    view = screen.View(screen.Bounds(-1920, 0, 2560, 1440), 1280, 720)
+    assert view.from_normalized(0, 0) == (-1920, 0)
+    assert view.from_normalized(500, 500) == (-640, 720)
+    assert view.from_normalized(1000, 1000) == (639, 1439)
+    for n in (0, 1, 333, 500, 999):
+        sx, sy = view.from_normalized(n, n)
+        assert view.to_normalized(sx, sy) == (n, n)
+    assert view.to_normalized(700, 0) is None
+
+
+def test_normalized_coordinates_map_to_screen(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    _set_view(rt)
+    out = structured(call("click", {"x": 500, "y": 500, "humanize": False, "coordinate_space": "normalized"}))
+    assert out["coordinate_space"] == "normalized"
+    assert backend.position() == (1280, 720)
+    assert out["cursor"]["normalized"] == [500, 500] and out["cursor"]["screenshot"] == [640, 360]
+    call("mouse_move", {"x": 250, "y": 0, "humanize": False, "coordinate_space": "normalized"})
+    assert backend.position() == (640, 0)
+
+
+def test_normalized_requires_a_screenshot(fake_runtime) -> None:
+    _, rec, _ = fake_runtime
+    with pytest.raises(ToolError, match="needs a screenshot first"):
+        call("click", {"x": 500, "y": 500, "coordinate_space": "normalized"})
+    assert not rec.of("down")
+
+
+@pytest.mark.parametrize(
+    ("args", "hints"),
+    [
+        ({"x": 1500, "y": 800}, ['coordinate_space="screen"', "x 0..1279, y 0..719"]),
+        ({"x": 900, "y": 900}, ['coordinate_space="screen"', 'coordinate_space="normalized"']),
+        ({"x": -5, "y": 10}, ["x=-5, y=10"]),
+        ({"x": 1200, "y": 500, "coordinate_space": "normalized"}, ['coordinate_space="screenshot"', "x 0..1000"]),
+    ],
+)
+def test_out_of_range_coordinates_are_rejected(fake_runtime, args: dict[str, Any], hints: list[str]) -> None:
+    rt, rec, backend = fake_runtime
+    _set_view(rt)
+    with pytest.raises(ToolError, match="outside the valid range") as err:
+        call("click", {**args, "humanize": False})
+    for hint in hints:
+        assert hint in str(err.value)
+    assert "Nothing was done" in str(err.value)
+    assert not rec.of("down") and backend.position() == (400, 400)
+
+
+def test_drag_validates_both_points_before_moving(fake_runtime) -> None:
+    rt, rec, backend = fake_runtime
+    _set_view(rt)
+    with pytest.raises(ToolError, match="x=2000"):
+        call("drag", {"start_x": 10, "start_y": 10, "end_x": 2000, "end_y": 10, "humanize": False})
+    assert backend.position() == (400, 400) and not rec.of("down")
+
+
+def test_single_axis_is_mapped(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    _set_view(rt)
+    call("click", {"x": 100, "humanize": False})
+    assert backend.position() == (201, 400)
+
+
+def test_screen_space_is_not_range_checked(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    _set_view(rt)
+    out = structured(call("mouse_move", {"x": 1500, "y": 800, "humanize": False, "coordinate_space": "screen"}))
+    assert out["coordinate_space"] == "screen" and backend.position() == (1500, 800)
+
+
+def test_default_coordinate_space_comes_from_config(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    _set_view(rt)
+    call("set_config", {"updates": {"screenshot.coordinate_space": "normalized"}})
+    out = structured(call("click", {"x": 250, "y": 250, "humanize": False}))
+    assert out["coordinate_space"] == "normalized" and backend.position() == (640, 360)
+    out = structured(call("click", {"x": 250, "y": 250, "humanize": False, "coordinate_space": "screenshot"}))
+    assert out["coordinate_space"] == "screenshot" and backend.position() == (501, 501)
+    out = structured(call("mouse_move", {"x": 7, "y": 9, "humanize": False, "overrides": {"screenshot.coordinate_space": "screen"}}))
+    assert out["coordinate_space"] == "screen" and backend.position() == (7, 9)
+    with pytest.raises(ToolError, match="not one of"):
+        call("set_config", {"updates": {"screenshot.coordinate_space": "pixels"}})
+
+
+def test_env_default_coordinate_space(tmp_path: Path) -> None:
+    rec = Recorder()
+    backend = FakeMouseBackend(rec, start=(400, 400))
+    mouse = Mouse(backend, rng=random.Random(1), sleep=rec.sleep)
+    keyboard = Keyboard(FakeKeyboardBackend(rec), rng=random.Random(2), sleep=rec.sleep)
+    env = {"HUMANLIKE_SCREENSHOT__COORDINATE_SPACE": "normalized", "HUMANLIKE_SCREENSHOT__MAX_WIDTH": "1260"}
+    rt = server.Runtime(config=ConfigManager(env=env, cwd=tmp_path), mouse=mouse, keyboard=keyboard)
+    server.set_runtime(rt)
+    try:
+        _set_view(rt)
+        out = structured(call("mouse_move", {"x": 500, "y": 500, "humanize": False}))
+        assert out["coordinate_space"] == "normalized" and backend.position() == (1280, 720)
+        cfg = structured(call("get_config"))["settings"]["screenshot"]
+        assert cfg["max_width"] == {"value": 1260, "source": "env"}
+        text = call("screenshot").content[0].text
+        assert "0-1000 grid" in text.splitlines()[0]
+        assert shot_meta(text)["image_width"] <= 1260
+    finally:
+        server.set_runtime(None)
+
+
+def test_screenshot_settings_drive_capture(fake_runtime) -> None:
+    call("set_config", {"updates": {"screenshot.max_width": 300, "screenshot.snap_multiple": 28}})
+    info = shot_meta(call("screenshot").content[0].text)
+    assert info["image_width"] == 280 and info["image_height"] % 28 == 0
+    assert info["scale_x"] == round(info["region"]["width"] / 280, 6)
+    info = shot_meta(call("screenshot", {"grid": 50}).content[0].text)
+    assert info["grid"] == 50
+    with pytest.raises(ToolError, match="too dense"):
+        call("screenshot", {"grid": 3})
+
+
+def test_target_size_and_snapping() -> None:
+    assert screen.target_size(2560, 1440, 1280) == (1280, 720)
+    assert screen.target_size(2560, 1440, 1280, 28) == (1260, 700)
+    assert screen.target_size(1920, 1080, None, 28) == (1904, 1064)
+    assert screen.target_size(800, 600, 1280) == (800, 600)
+    assert screen.target_size(10, 10, None, 28) == (28, 28)
+
+
+def test_grid_ticks_and_overlay() -> None:
+    from PIL import Image as PILImage
+
+    assert screen._ticks(1280, 0, 2560, 250, "normalized") == [(0, 0), (320, 250), (640, 500), (960, 750), (1279, 1000)]
+    assert screen._ticks(1280, -1920, 2560, 1000, "screen") == [(460, -1000), (960, 0)]
+    assert screen._ticks(300, 0, 600, 100, "screenshot") == [(0, 0), (100, 100), (200, 200)]
+    view = screen.View(screen.Bounds(0, 0, 400, 200), 200, 100)
+    img = screen.draw_grid(PILImage.new("RGB", (200, 100), "white"), view, 50, "screenshot")
+    assert img.size == (200, 100) and img.mode == "RGB"
+    assert img.getpixel((50, 60)) != (255, 255, 255)
+    assert img.getpixel((25, 70)) == (255, 255, 255)
+
+
+def test_screenshot_header_wording() -> None:
+    view = screen.View(screen.Bounds(0, 0, 2560, 1440), 1280, 720)
+    head = server.screenshot_header(view, "screenshot", 1).splitlines()
+    assert head[0].startswith("Screenshot 1280x720 of a 2560x1440 screen")
+    assert "pixels in this image, x 0..1279, y 0..719" in head[0]
+    assert "does not support image input" in head[1]
+    assert "0-1000 grid" in server.screenshot_header(view, "normalized", 1)
+    assert "x 0..2559, y 0..1439" in server.screenshot_header(view, "screen", 1)
+
+
+def test_display_hint() -> None:
+    from humanlike_mcp.config import Settings
+
+    primary = screen.Bounds(0, 0, 2560, 1440)
+    hint = server.display_hint(Settings(), primary)
+    assert "2560x1440" in hint and "1280x720" in hint and '"screenshot"' in hint
+    tuned = Settings().with_updates({"screenshot.coordinate_space": "normalized", "screenshot.snap_multiple": 28})
+    assert "1260x700" in server.display_hint(tuned, primary) and "0-1000 grid" in server.display_hint(tuned, primary)
 
 
 async def _stdio_session(tmp_path: Path) -> dict[str, Any]:
@@ -272,13 +467,20 @@ async def _stdio_session(tmp_path: Path) -> dict[str, Any]:
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
-            await session.initialize()
+            init = await session.initialize()
             tools = await session.list_tools()
             config = await session.call_tool("get_config", {})
             size = await session.call_tool("get_screen_size", {})
             shot = await session.call_tool("screenshot", {"max_width": 400})
             bad = await session.call_tool("set_config", {"updates": {"typing.wpm": -1}})
-            return {"tools": tools, "config": config, "size": size, "shot": shot, "bad": bad}
+            return {
+                "tools": tools,
+                "config": config,
+                "size": size,
+                "shot": shot,
+                "bad": bad,
+                "instructions": init.instructions or "",
+            }
 
 
 def test_stdio_server_end_to_end(tmp_path: Path) -> None:
@@ -290,5 +492,9 @@ def test_stdio_server_end_to_end(tmp_path: Path) -> None:
     assert size["width"] > 0
     image = out["shot"].content[1]
     assert image.type == "image" and base64.b64decode(image.data).startswith(PNG_MAGIC)
-    assert json.loads(out["shot"].content[0].text)["image_width"] == 400
+    assert out["shot"].structured_content is None
+    assert shot_meta(out["shot"].content[0].text)["image_width"] == 400
+    assert "This machine: primary monitor" in out["instructions"]
+    shot_tool = next(t for t in out["tools"].tools if t.name == "screenshot")
+    assert "This machine: primary monitor" in shot_tool.description
     assert out["bad"].is_error and "minimum" in out["bad"].content[0].text

@@ -37,10 +37,12 @@ Then set `consent: yes`, `consent_given_at`, `status: running` and `session_star
 
 | Tool | Params (defaults) | Loop usage |
 | --- | --- | --- |
-| `screenshot` | `monitor=1`, `max_width=1280`, `format="png"`, `quality=80` | Every observe and verify step. Metadata comes first: `screen_resolution`, `image_size`, `scale`, `cursor_screen` and `cursor_screenshot`. It becomes the reference for screenshot-space coordinates. Use `max_width: null` only to read tiny text, then take a 1280 px shot again before clicking. |
+| `screenshot` | `monitor=1`, `max_width` (configured, 1280), `format="png"`, `quality=80`, `image=true`, `grid` (configured, off) | Every observe and verify step. The text block starts with a plain line giving the image size, the screen size and the **active coordinate space with its valid range**; follow it. JSON metadata follows (`screen_resolution`, `image_size`, `scale`, `coordinate_space`, `valid_range`, cursor in every space). It becomes the reference for screenshot and normalized coordinates. Use `max_width: 0` (full resolution) only to read tiny text, then take a normal shot again before clicking. `image: false` returns only the text, at almost no context cost, and keeps the coordinate reference; use it when no visual check is needed. If you can't see the image, halt and escalate (`blocked_reason: error`, "model is not receiving images"). |
 | `get_screen_size` | none | Once per session; record `resolution` and the monitor layout in `last_screenshot_summary` if multi-monitor. |
-| `get_cursor_position` | none | Rarely; the screenshot metadata and every mouse result already include the cursor in both spaces. |
-| `mouse_move` | `x`, `y`, `speed?`, `humanize?`, `coordinate_space="screenshot"`, `overrides?` | Hover menus and tooltips. All mouse tools take latest-screenshot pixels by default. |
+| `get_cursor_position` | none | Rarely; the screenshot metadata and every mouse result already include the cursor in every space. |
+| `reset_image_budget` | none | Only after the user confirms they compacted the conversation or started a new session following an "Image budget reached" pause. Leaves other settings alone (unlike `reset_config`, which also resets the budget but clears runtime settings such as a calibration). |
+| `calibrate` / `calibrate_submit` | `monitor=1`; `points` (`[[x1,y1],...]`) | Once, when clicks keep landing off-target or out-of-range errors repeat. `calibrate` costs one image of the budget. `calibrate` returns a synthetic target image (not the real screen, sends no input); report each target centre exactly as you would click it to `calibrate_submit`. A good fit becomes the session default; record `matched` and `persist` in the notes and tell the user so they can make it permanent. |
+| `mouse_move` | `x`, `y`, `speed?`, `humanize?`, `coordinate_space?` (`screenshot` / `normalized` / `screen` / `calibrated`; omit = configured default), `overrides?` | Hover menus and tooltips. All mouse tools take coordinates in the space named by the latest screenshot's first line. |
 | `click` | `x?`, `y?`, `button="left"`, `clicks=1..3`, `speed?`, `humanize?`, `overrides?` | Main pointing action. For tiny targets add `overrides: {"mouse.landing_jitter_px": 0, "mouse.overshoot_enabled": false}`. |
 | `mouse_down` / `mouse_up` | `button`, (`x?`, `y?` on down) | Only for multi-step gestures. Always release. |
 | `drag` | `start_x`, `start_y`, `end_x`, `end_y`, `button`, `speed?`, `humanize?`, `overrides?` | Sliders, selection, drag-and-drop. |
@@ -65,12 +67,16 @@ The server reports expected problems as tool errors with readable text. Match on
 | `Unknown key name`, `Invalid hotkey`, `Duplicate key in hotkey`, `Key '…' is not supported on this platform` | Bad key input | Fix it using the names in docs/agent-usage.md, then retry once. |
 | `Text is N characters; the limit is …` | `type_text` over `safety.max_text_length` | Split the text into chunks (one per iteration). |
 | `monitor must be between 0 and N` | Monitor layout changed | Call `get_screen_size`, update the notes, retry. |
+| `x=…, y=… is outside the valid range for coordinate_space=` | Coordinates don't fit the latest screenshot in the active space (wrong space, or read from an older, differently sized screenshot). Nothing was clicked. | Re-observe with a fresh screenshot, re-read its first line, retry once with corrected numbers or the suggested `coordinate_space`. Doesn't count as a step retry. If the error says it is a repeat, run `calibrate` / `calibrate_submit` before the next click. |
+| `coordinate_space="normalized" needs a screenshot first` (or `"calibrated"`) | No screenshot in this server session yet | Take a screenshot and retry. |
+| `Image budget reached` (screenshot text, or a `calibrate` error) | `screenshot.max_session_images` is used up; no image was sent | `status: paused`, `blocked_reason: image_budget`, stop the schedule, ask the user to `/compact` or start a new session. After they confirm, `reset_image_budget` and resume from `current_step`. |
+| `The reported points are inconsistent` / `you reported [y, x]` | `calibrate_submit` rejected the points; nothing changed | Call `calibrate` again and report the centres as `[x, y]` in target order. After two failures, escalate (`blocked_reason: error`). |
 | `button must be one of`, `clicks must be 1, 2 or 3`, `presses must be between 1 and 100` | Argument out of range | Fix and retry. |
 | An input validation error naming a parameter | Schema violation (e.g. `scroll` amount over 500, `wait` over 300) | Fix and retry. |
 | `Error executing tool <name>` | Unexpected server crash | Retry once after `wait 2`. If it repeats, escalate (`blocked_reason: error`) and suggest the user check the MCP server log. |
 | Tool missing, or server disconnected | The MCP server is down or was reloaded | Don't act. Escalate and point to docs/agent-setup.md. |
 
-Clamping is silent: off-screen coordinates are clamped, not rejected. If the returned `to` or `position` differs from your target by more than about 5 px, your coordinate mapping is wrong. Re-observe before clicking again.
+Screenshot, normalized and calibrated coordinates outside the image are rejected; only `coordinate_space: "screen"` coordinates are clamped silently to the desktop. If the returned `cursor` position (in the space you used) differs from your target by more than about 5 px, your coordinates are in the wrong space. Re-observe before clicking again, and calibrate if it keeps happening.
 
 **Interrupted gestures:** if any error happens between `mouse_down` and `mouse_up`, call `mouse_up {"button": ...}` before anything else, even after a fail-safe. `mouse_up` is always allowed.
 

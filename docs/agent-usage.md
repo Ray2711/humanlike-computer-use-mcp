@@ -23,41 +23,67 @@ How an AI agent should **use** this server's tools effectively and safely. For i
 
 ## 2. Coordinates: click what you see
 
-`screenshot` defaults to the **primary monitor** (`monitor=1`), downscaled to **1280 px wide** (`max_width=1280`). It returns two content items: first a **JSON text** block, then the **image**:
+`screenshot` defaults to the **primary monitor** (`monitor=1`), downscaled to **1280 px wide** (the `screenshot.max_width` setting). It returns two content items: first a **text** block, then the **image**. The text starts with a plain line that states the sizes and the coordinates the mouse tools expect, then a line about missing images, then JSON:
 
-```json
-{
-  "screen_resolution": "1920x1080",
-  "image_size": "1280x720",
-  "image_width": 1280,
-  "image_height": 720,
-  "format": "png",
-  "region": {"left": 0, "top": 0, "width": 1920, "height": 1080},
-  "scale": 1.5,
-  "to_screen": "screen_x = region.left + image_x * scale; screen_y = region.top + image_y * scale",
-  "cursor_screen": [961, 540],
-  "cursor_screenshot": [640, 360],
-  "coordinates": "Mouse tools take pixel coordinates in this image by default; ..."
-}
+```text
+Screenshot 1280x720 of a 1920x1080 screen (monitor 1, top-left at screen 0,0). Click coordinates (coordinate_space="screenshot"): pixels in this image, x 0..1279, y 0..719.
+If no image follows this text, or it was replaced by an error such as "this model does not support image input", ...
+{"screen_resolution": "1920x1080", "image_size": "1280x720", "image_width": 1280, "image_height": 720,
+ "format": "png", "region": {"left": 0, "top": 0, "width": 1920, "height": 1080},
+ "scale": 1.5, "scale_x": 1.5, "scale_y": 1.5, "to_screen": "...",
+ "coordinate_space": "screenshot", "valid_range": {"x": [0, 1279], "y": [0, 719]},
+ "cursor_screen": [961, 540], "cursor_screenshot": [640, 360], "cursor_normalized": [501, 500]}
 ```
 
-**Pass image pixel coordinates straight to the mouse tools.** `click`, `mouse_move`, `mouse_down`, `drag` and `scroll` default to `coordinate_space: "screenshot"`. The server converts the coordinates to real screen pixels using the **most recent** screenshot, so you never scale anything yourself.
+**Follow the first line.** It names the active coordinate space and the valid range. Mouse tools (`click`, `mouse_move`, `mouse_down`, `drag`, `scroll`) accept four spaces; omit `coordinate_space` to use the configured default:
 
+| `coordinate_space` | Pass | Range |
+| --- | --- | --- |
+| `"screenshot"` (usual default) | Pixels in the latest screenshot, exactly as you see them. | `0..image_width-1`, `0..image_height-1` |
+| `"normalized"` | Position on a 0–1000 grid over the latest screenshot (500,500 = centre), whatever the image size. Natural for models trained on 0–1000 coordinates (Qwen3-VL, GLM-V, Gemini, Gemma). | `0..1000` |
+| `"screen"` | Physical screen pixels. Use only when you already have screen pixels, e.g. from `get_cursor_position`. | Anything (clamped to the desktop) |
+| `"calibrated"` | Your own convention, exactly as you reported the targets to `calibrate_submit`. | Named in the screenshot's first line |
+
+The server converts screenshot, normalized and calibrated coordinates to real screen pixels using the **most recent** screenshot, so you never scale anything yourself.
+
+**Calibrate when clicks land off-target.** If the cursor keeps ending up somewhere other than where you aimed, or out-of-range errors repeat, measure your convention once instead of guessing:
+
+1. Call `calibrate`. It returns a synthetic image (not the real screen; nothing is clicked) the size of a normal screenshot, with numbered targets.
+2. Report the centre of each target **exactly as you would pass it to `click`**, in target order: `calibrate_submit {"points": [[x1, y1], [x2, y2], ...]}`. Point at the targets directly. Don't calculate, convert, or check the numbers against an image size, and use the same convention for x and y. If you have no natural convention, use a 0–1000 grid on both axes (1000 = right or bottom edge, even though the image is wider than tall).
+3. On success the result names the convention (`matched`), its `quality` (`good`, or `usable` with a warning) and makes it the default for this session. Calibration is then done: don't call `calibrate` again. Keep giving coordinates the same way and omit `coordinate_space`. Show the user the `persist` values so they can make it permanent.
+4. On an error, nothing changed. Read it and resubmit **corrected** points for the same image; never the same points again.
+   - "Your x values match … but your y values do not": re-report y on the scale it names.
+   - "you reported [y, x]": swap to `[x, y]`.
+   - "inconsistent": check the order and the centres. If you estimated pixels, point on a 0–1000 grid instead.
+   - "stop calibrating": stop, keep the current settings and tell the user calibration didn't converge.
+
+- **If you cannot see the image** (no image after the text, or an error like "this model does not support image input"), **stop and tell the user.** Don't guess coordinates from `screen_resolution`; the client or model isn't passing images to you.
+- **Out-of-range coordinates are rejected, not clamped.** The error states the valid range, says nothing was done, and suggests the space your numbers probably belong to. Re-read the first line of the latest screenshot and retry with the right numbers or `coordinate_space`. If it happens again, calibrate (above).
 - **Coordinates always refer to the latest screenshot.** Every `screenshot` call, including small polling shots (e.g. `max_width: 640`), replaces the mapping. Read coordinates from the screenshot you just took, not an older one.
-- **Every mouse result includes `cursor`** with `screen` and `screenshot` positions, so you can check where the pointer landed in the image you're looking at. `cursor.screenshot` is `null` when the cursor is outside the captured area (e.g. on another monitor).
-- **Before any screenshot,** coordinates are treated as screen pixels, and the result carries a `note` saying so. Take a screenshot first.
-- **`coordinate_space: "screen"`** takes physical screen pixels instead. (0, 0) is the primary monitor's top-left corner, other monitors can be negative, and the conversion is `screen_x = region.left + image_x * scale`. Use it only when you already have screen pixels, e.g. from `get_screen_size` or `get_cursor_position`.
+- **Every mouse result includes `cursor`** with `screen`, `screenshot` and `normalized` positions, so you can check where the pointer landed. The latter two are `null` when the cursor is outside the captured area (e.g. on another monitor).
+- **Before any screenshot,** `"screenshot"` coordinates are treated as screen pixels, and the result carries a `note` saying so; `"normalized"` and `"calibrated"` coordinates are an error. Take a screenshot first.
 - Coordinates are **physical pixels**. The server is DPI aware, so don't apply Windows display scaling (125% / 150%) yourself.
-- **`get_cursor_position`** returns `x`/`y` (screen) plus `screen` and, after a screenshot, `screenshot` positions. **`get_screen_size`** returns `resolution` (e.g. `"2560x1440"`) and every monitor's bounds.
+- **`grid`**: pass e.g. `grid: 100` to `screenshot` to overlay labeled lines every 100 units of the active space. The labels are valid coordinates. Use it when you're unsure of a position.
+- **`get_cursor_position`** returns `x`/`y` (screen) plus `screen` and, after a screenshot, `screenshot` and `normalized` positions. **`get_screen_size`** returns `resolution` (e.g. `"2560x1440"`) and every monitor's bounds.
 
 **Choosing screenshot options:**
 
 - Keep the default 1280 px width. Some clients silently downscale larger images before the model sees them, which breaks coordinates. Avoid going above about 1500 px.
 - Go smaller (e.g. 640–1024) for quick "did it work?" checks, but take a normal screenshot again before clicking anything.
 - Use `format: "jpeg"` (with `quality` around 70–80) to shrink payloads further. Use PNG when you need to read small text.
+- **`image: false`** returns only the metadata (resolution, cursor position in both spaces), with no image. Use it when you only need to know where the cursor is. It costs almost no context, and it does **not** replace the coordinate reference. The MCP server never re-sends old screenshots, but most clients keep every earlier image in the conversation, so each image you skip saves context for the rest of the session.
 - Other monitors: `monitor: 2` (etc.), or `monitor: 0` for the whole virtual desktop. Clicks then map into that monitor automatically.
 
-**Worked example.** The primary monitor is 1920×1080, and the default screenshot is 1280×720. A button appears at image (400, 300), so you call `click {"x": 400, "y": 300}`. The server clicks screen (600, 450), and the result reports `cursor.screenshot ≈ [400, 300]`.
+**Worked example.** The primary monitor is 1920×1080, and the default screenshot is 1280×720. A button appears at image (400, 300), so you call `click {"x": 400, "y": 300}`. The server clicks screen (600, 450), and the result reports `cursor.screenshot ≈ [400, 300]`. If the first line says `coordinate_space="normalized"` instead, the same button is at `click {"x": 313, "y": 417}` (400/1280·1000, 300/720·1000).
+
+**Image budget.** Most clients re-send every earlier image with each request, and some providers reject requests above a fixed number of images (abliteration.ai: 4, giving "This request has more images than the limit of 4"). Even without a hard cap, every image costs context. Spend images only where you need to *see* something:
+
+- **Verify without a picture when you can.** A mouse result already reports where the cursor landed (`cursor` in every space). `screenshot {"image": false}` costs no image and still gives the cursor position and screen size. That is enough to confirm a move, a hover position or a scroll target. Take a real screenshot when the outcome is only visible on screen: a dialog opened, text was typed, a page loaded.
+- **Don't take "just in case" screenshots.** Avoid a small polling shot followed by a full one; a 640 px image counts as one image just like a 1280 px one. Batch your observation: read everything you need from one screenshot before acting.
+- **If the text says `Image budget: N of M images used`,** the server has a limit set (`screenshot.max_session_images`). Plan the remaining images for the steps that need them.
+- **If a screenshot says `Image budget reached`,** no image was attached. Stop taking image screenshots and tell the user: ask them to compact the conversation (`/compact` in opencode) or start a new session. Once they confirm, call `reset_image_budget` and continue. `calibrate` is refused while the budget is used up.
+- **For long runs,** keep progress in files (the continuous-computer-use skill keeps it in `tasks.md` / `state.md`) so a fresh session can pick up where the old one stopped, instead of relying on a long conversation full of screenshots.
+- If the user reports the provider's image-limit error, point them to the README section [Image limit](../README.md#image-limit-more-images-than-the-limit-of-4). An opencode plugin there trims old images on the client side.
 
 ---
 
@@ -191,8 +217,14 @@ Scroll, then take a `screenshot` before scrolling more. Don't overshoot long pag
 | `Unknown key name '…'` / `Duplicate key in hotkey …` | Bad `press_key` / `hotkey` input | Use the names in section 6 |
 | `Text is N characters; the limit is …` | `type_text` above `safety.max_text_length` | Split the text, or ask the user before raising the limit |
 | `monitor must be between 0 and N` | Bad `screenshot` monitor index | Call `get_screen_size` |
+| `x=…, y=… is outside the valid range for coordinate_space="…"` | Your x/y don't fit the latest screenshot in the active space; usually screen pixels or a 0–1000 grid passed as image pixels. Nothing was clicked. | Re-read the screenshot's first line, then retry with the space the error suggests or corrected numbers. On a repeat, calibrate |
+| `coordinate_space="normalized" needs a screenshot first` (or `"calibrated"`) | No screenshot has been taken yet | Call `screenshot`, then retry |
+| `Image budget reached (N of M images …)` (in a screenshot's text, or as a `calibrate` error) | `screenshot.max_session_images` is used up; no image was sent | Tell the user to `/compact` or start a new session; after they confirm, call `reset_image_budget`. Meanwhile use `image: false` and mouse results |
+| `Call calibrate first` | `calibrate_submit` without a preceding `calibrate` | Call `calibrate`, then submit the points for that image |
+| `The reported points are inconsistent…` / `…you reported [y, x]` / `Your x values match … but your y values do not` | The calibration points don't fit one linear map (misread, wrong order, swapped axes, mixed conventions, or estimated pixels). Nothing changed. | Resubmit corrected points for the same image as the message says: `[x, y]` order, one convention for both axes, or a 0–1000 grid. Never resubmit identical points |
+| `… stop calibrating …` | Third failed calibration submission | Stop calibrating and tell the user it didn't converge |
 
-Off-screen coordinates are **clamped** to the desktop, not rejected. If `mouse_move` returns a `to` far from what you asked for, your coordinate conversion is probably wrong.
+Screenshot, normalized and calibrated coordinates outside the image are **rejected**. Screen coordinates (`coordinate_space: "screen"`) are **clamped** to the desktop instead. If `mouse_move` returns a `to` far from what you asked for, your coordinates are probably in the wrong space.
 
 ---
 
@@ -212,11 +244,14 @@ screenshot {"max_width": 1280}                   -> verify the page loaded
 ### Click a button seen in a downscaled screenshot
 
 ```text
-screenshot {"max_width": 1280}
-  -> metadata: scale 1.5, region {left: 0, top: 0}; button at image (842, 611)
-click      {"x": 1263, "y": 917}                 -> 842*1.5, 611*1.5 (rounded)
-screenshot {"max_width": 1280}                   -> verify
+screenshot {}
+  -> first line: "Screenshot 1280x720 of a 1920x1080 screen ... pixels in this image, x 0..1279, y 0..719"
+  -> button at image (842, 611)
+click      {"x": 842, "y": 611}                  -> pass image pixels as-is; the server scales them
+screenshot {}                                    -> verify
 ```
+
+With `coordinate_space="normalized"` active, the same button is `click {"x": 658, "y": 849}` (842/1280·1000, 611/720·1000). To pass screen pixels explicitly: `click {"x": 1263, "y": 917, "coordinate_space": "screen"}`.
 
 ### Fill a form field and submit
 

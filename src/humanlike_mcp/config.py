@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, ClassVar, Mapping
 
 Range = tuple[float, float]
+Vector = tuple[float, float, float, float]
+VECTOR_LENGTH = 4
 
 ENV_PREFIX = "HUMANLIKE_"
 ENV_PRESET = "HUMANLIKE_PRESET"
@@ -40,7 +42,7 @@ def _kind(default: Any) -> str:
     if isinstance(default, float):
         return "float"
     if isinstance(default, tuple):
-        return "range"
+        return "range" if len(default) == 2 else "vector"
     return "str"
 
 
@@ -85,6 +87,10 @@ def _validate(key: str, kind: str, value: Any, meta: Mapping[str, Any]) -> Any:
         if lo > hi:
             raise ConfigError(f"{key}: min {lo} is greater than max {hi}")
         return (lo, hi)
+    if kind == "vector":
+        if not isinstance(value, (tuple, list)) or len(value) != VECTOR_LENGTH:
+            raise ConfigError(f"{key}: expected a list of {VECTOR_LENGTH} numbers, got {value!r}")
+        return tuple(_validate(key, "float", v, meta) for v in value)
     if not isinstance(value, str):
         raise ConfigError(f"{key}: expected a string, got {value!r}")
     choices = meta.get("choices") or ()
@@ -175,6 +181,39 @@ class HumanizeSettings(_Section):
     enabled: bool = _opt(True)
 
 
+COORDINATE_SPACES = ("screenshot", "normalized", "screen", "calibrated")
+CALIBRATION_UNITS = ("image", "absolute")
+
+
+@dataclass(frozen=True)
+class ScreenshotSettings(_Section):
+    section_name: ClassVar[str] = "screenshot"
+    coordinate_space: str = _opt("screenshot", choices=COORDINATE_SPACES)
+    max_width: int = _opt(1280, 0, 16384)
+    snap_multiple: int = _opt(0, 0, 256)
+    grid: int = _opt(0, 0, 1000)
+    calibration: Vector = _opt((1.0, 0.0, 1.0, 0.0), -1000.0, 1000.0)
+    calibration_units: str = _opt("image", choices=CALIBRATION_UNITS)
+    max_session_images: int = _opt(0, 0, 10000)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if 0 < self.max_width < 64:
+            raise ConfigError(f"screenshot.max_width: {self.max_width} is too small; use 0 (full resolution) or at least 64")
+        if 0 < self.grid < 10:
+            raise ConfigError(f"screenshot.grid: {self.grid} is too dense; use 0 (off) or at least 10")
+        sx, _, sy, _ = self.calibration
+        if abs(sx) < 1e-9 or abs(sy) < 1e-9:
+            raise ConfigError("screenshot.calibration: the x and y scales (1st and 3rd values) must not be 0")
+
+
+@dataclass(frozen=True)
+class DebugSettings(_Section):
+    section_name: ClassVar[str] = "debug"
+    log_path: str = _opt("")
+    log_text: bool = _opt(False)
+
+
 SECTIONS: dict[str, type[_Section]] = {
     cls.section_name: cls
     for cls in (
@@ -186,6 +225,8 @@ SECTIONS: dict[str, type[_Section]] = {
         KeysSettings,
         SafetySettings,
         HumanizeSettings,
+        ScreenshotSettings,
+        DebugSettings,
     )
 }
 
@@ -200,6 +241,8 @@ class Settings:
     keys: KeysSettings = field(default_factory=KeysSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
     humanize: HumanizeSettings = field(default_factory=HumanizeSettings)
+    screenshot: ScreenshotSettings = field(default_factory=ScreenshotSettings)
+    debug: DebugSettings = field(default_factory=DebugSettings)
 
     def flat(self) -> dict[str, Any]:
         return {
@@ -280,6 +323,10 @@ def coerce(key: str, value: Any) -> Any:
         if isinstance(value, list):
             return tuple(value)
         return value
+    if kind == "vector":
+        if isinstance(value, str):
+            value = [_parse_number(key, p) for p in value.strip().strip("[]()").split(",") if p.strip()]
+        return tuple(value) if isinstance(value, list) else value
     return value.strip() if isinstance(value, str) else value
 
 

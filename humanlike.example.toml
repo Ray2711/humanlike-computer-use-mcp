@@ -67,3 +67,28 @@ repeat_gap_ms = [60, 160]        # gap between repeated press_key presses
 [safety]
 failsafe = true                  # cursor in a primary-screen corner aborts all input
 max_text_length = 10000          # type_text refuses longer text
+
+[screenshot]
+# How mouse tools read x/y when a call omits coordinate_space:
+#   "screenshot" = pixels in the latest screenshot image (most models; Qwen2.5-VL, UI-TARS-1.5, Claude, GPT)
+#   "normalized" = 0-1000 grid over the latest screenshot (Qwen2-VL/Qwen3-VL/Qwen3.5, GLM-4.xV, Gemini, Gemma 4, UI-TARS v1)
+#   "screen"     = physical screen pixels
+#   "calibrated" = the model's own convention, measured with the calibrate / calibrate_submit tools
+coordinate_space = "screenshot"
+max_width = 1280                 # default screenshot width in px; 0 = full resolution, otherwise >= 64
+snap_multiple = 0                # round image width/height down to a multiple of this (28 for Qwen2.5-VL); 0 = off
+grid = 0                         # labeled grid lines every N units of coordinate_space; 0 = off, otherwise >= 10
+# Linear map used by coordinate_space = "calibrated": [sx, ox, sy, oy] with
+# fraction_of_image_x = sx * X + ox (same for y). calibrate_submit prints the values to paste here.
+calibration = [1.0, 0.0, 1.0, 0.0]
+# "image": X = (reported_x + 0.5) / image_width, so the map follows max_width changes (pixel-like conventions).
+# "absolute": X = reported_x, a fixed grid such as 0-1.
+calibration_units = "image"
+# Images (screenshot + calibrate) this server process may return; 0 = unlimited. Once used up, screenshots
+# return metadata only until reset_image_budget. For providers that cap images per request (abliteration.ai: 4)
+# when no client-side pruning is installed.
+max_session_images = 0
+
+[debug]
+log_path = ""                    # append JSONL records of screenshots, mouse mapping and typing here; "" = off
+log_text = false                 # also log the typed text (off: only its length is logged)

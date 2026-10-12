@@ -76,7 +76,7 @@ Iteration:
 - If there is no current task, take the first unchecked `- [ ]` item that is eligible: not `@blocked`, and any `@after` time has passed.
 
 **2. Observe.**
-- Call `screenshot {"max_width": 1280}`. Pass pixel coordinates from **this image** straight to the mouse tools. They default to `coordinate_space: "screenshot"`, and the server maps them to the screen. Coordinates always refer to the **latest** screenshot, so after a small polling screenshot, take a 1280 px one again before clicking.
+- Call `screenshot {"max_width": 1280}`. Read target coordinates from **this image** in the coordinate space its first text line names (image pixels by default, or a 0–1000 grid if configured as `"normalized"`) and pass them straight to the mouse tools; the server maps them to the screen. If you can't see the image, halt and tell the user. If clicks keep landing off-target, run `calibrate` / `calibrate_submit` once (see reference.md). Coordinates always refer to the **latest** screenshot, so after a small polling screenshot, take a 1280 px one again before clicking.
 - Write a one-line **screen signature**: the foreground app and window title, plus the key visible text, e.g. `Notepad - todo.txt | caret line 3`.
 - **Allowlist check:** if the foreground app is not in `allowed_apps` and the step does not explicitly require switching to an allowed app, do not act. Escalate.
 
@@ -122,11 +122,21 @@ Iteration:
 
 All waiting uses the server's `wait` tool (0–300 s, ±5% jitter when humanization is on). `wait` watches the corner fail-safe while it sleeps and aborts with `Fail-safe triggered` if the user slams the cursor into a corner. Treat that exactly like any other fail-safe. Details and tables: [reference.md](reference.md#waiting).
 
-1. **Settle after every action.** Poll `wait` then `screenshot {"max_width": 640}` on a backoff of **0.5, 1, 2, 4, 4, … s**. Stop as soon as the expected element appears, or two consecutive screenshots look the same, or the timeout passes. Typical timeouts: UI click 3 s, menu/dialog 5 s, page navigation 20 s, app launch 45 s, file save 15 s, download 2 min in-tick (longer goes to a cross-tick wait). A timeout is a **mismatch**, not a crash.
+1. **Settle after every action.** Poll `wait` then `screenshot {"max_width": 640}` on a backoff of **0.5, 1, 2, 4, 4, … s** (when images are budgeted, see [Image budget](#image-budget): wait once for the typical settle time, then take a single screenshot). Stop as soon as the expected element appears, or two consecutive screenshots look the same, or the timeout passes. Typical timeouts: UI click 3 s, menu/dialog 5 s, page navigation 20 s, app launch 45 s, file save 15 s, download 2 min in-tick (longer goes to a cross-tick wait). A timeout is a **mismatch**, not a crash.
 2. **Human pacing.** Before acting on a newly seen screen, add a short reading pause scaled by preset: `natural` 0.4–1.2 s, `careful` 0.8–2 s, `fast` 0.2–0.5 s, `instant` none. Add 1–3 s (scaled the same way) after a whole new page or dialog. Pacing waits are optional flavour and never exceed 3 s.
 3. **Chunk long waits.** No single `wait` call longer than `max_wait_chunk_s` (30 s, at most 60 s). Between chunks, check the STOP file, `status` and `max_session_minutes`, and take a poll screenshot if waiting on a condition. Don't move the mouse while waiting.
 4. **Within a tick vs across ticks.** If the remaining wait fits in `max_wait_per_tick_s` (120 s), wait in chunks inside the tick. Otherwise record the wait in `state.md` (`waiting_for`, `wait_kind`, `wait_started_at`, `wait_deadline`, `next_check_at`), end the tick, and let `/loop` wake you. A tick that starts before `next_check_at` ends immediately, with no screenshot and no journal line.
 5. **Scheduled and conditional tasks.** `@after` holds a task until a time, `@every` re-queues it with the next `@after`, `@wait-until "<text>"` waits for visible text, and `@timeout` bounds it (default 10m). On timeout: escalate with `blocked_reason: wait_timeout`.
+
+## Image budget
+
+Clients re-send every earlier screenshot with each request, and some providers cap images per request (abliteration.ai: 4, giving "This request has more images than the limit of 4"). Treat images as a budget, especially when `state.md` sets `image_limited: yes` or screenshot text shows `Image budget: N of M`:
+
+- **One image per iteration at most.** The verify screenshot of iteration *n* is the observe screenshot of iteration *n+1*; don't take another one.
+- **Verify without a picture when the result proves itself.** A `mouse_move`/`scroll` result reports the cursor position; `screenshot {"image": false}` gives the cursor and screen size for free. Use a real screenshot for anything only visible on screen: typed text, dialogs, page changes.
+- **Settle without polling images.** Instead of the 640 px backoff loop, `wait` for the typical settle time of the action (Waiting, point 1), then take one screenshot. If it isn't settled, wait again and take one more; that is the last image for this step.
+- **"Image budget reached"** in a screenshot's text means no image was sent. Set `status: paused`, `blocked_reason: image_budget`, stop the schedule, and ask the user to `/compact` or start a new session. Because all progress is in `state.md`/`tasks.md`, a new session resumes from `current_step`. After the user confirms, call `reset_image_budget` and set `status: running`.
+- **The provider's image-limit error itself** (the request fails before any tool runs) can't be handled inside the session. If the user reports it, point them to the README section "Image limit" (opencode plugin `keep-last-images`, or a new session).
 
 ## Mandatory guardrails
 
@@ -167,7 +177,7 @@ Record the loop's PID or name in `state.md` (`loop_handle`), so pausing or stopp
 - `state.md` is the memory. Don't rely on chat history.
 - Keep at most about 30 journal lines. Compact older lines into `## History summary`, with one line per finished task.
 - Don't keep old screenshots in mind; only the latest signature matters.
-- When a fresh session starts, re-read the files and continue from `current_step`.
+- When a fresh session starts, re-read the files and continue from `current_step`. On image-limited providers, prefer many short sessions (one `/loop` tick per fresh session, or `/compact` between bursts) over one long screenshot-heavy conversation.
 
 ## Additional resources
 

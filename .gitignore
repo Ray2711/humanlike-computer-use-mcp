@@ -50,6 +50,9 @@ secrets.*
 humanlike.toml
 .cursor/mcp.json
 
+# opencode calibration experiments (generated config with machine paths, transcripts, debug logs)
+.calib-runs/
+
 # Logs, screenshots, recordings
 *.log
 screenshots/

@@ -188,6 +188,26 @@ def test_validation_errors(config: ConfigManager, updates: dict, message: str) -
         config.set(updates)
 
 
+def test_screenshot_settings_from_env_and_validation(tmp_path: Path) -> None:
+    env = {
+        "HUMANLIKE_SCREENSHOT__COORDINATE_SPACE": "normalized",
+        "HUMANLIKE_SCREENSHOT__MAX_WIDTH": "0",
+        "HUMANLIKE_SCREENSHOT__SNAP_MULTIPLE": "28",
+        "HUMANLIKE_SCREENSHOT__GRID": "100",
+    }
+    s = ConfigManager(env=env, cwd=tmp_path).settings.screenshot
+    assert (s.coordinate_space, s.max_width, s.snap_multiple, s.grid) == ("normalized", 0, 28, 100)
+    assert Settings().screenshot.coordinate_space == "screenshot" and Settings().screenshot.max_width == 1280
+    for bad, message in [
+        ({"HUMANLIKE_SCREENSHOT__COORDINATE_SPACE": "pixels"}, "not one of"),
+        ({"HUMANLIKE_SCREENSHOT__MAX_WIDTH": "10"}, "too small"),
+        ({"HUMANLIKE_SCREENSHOT__GRID": "5"}, "too dense"),
+        ({"HUMANLIKE_SCREENSHOT__SNAP_MULTIPLE": "999"}, "maximum"),
+    ]:
+        with pytest.raises(ConfigError, match=message):
+            ConfigManager(env=bad, cwd=tmp_path)
+
+
 def test_direct_dataclass_validation() -> None:
     with pytest.raises(ConfigError):
         TypingSettings(wpm=0)

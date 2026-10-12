@@ -16,7 +16,7 @@ It runs locally over **stdio** and is written in Python on top of the official `
 If you are an AI coding agent (Cursor, Claude Code, Codex, …):
 
 - [`AGENTS.md`](AGENTS.md): repo layout, venv setup, safe test commands, and code conventions.
-- [`docs/agent-setup.md`](docs/agent-setup.md): a step-by-step runbook for installing this server and registering it with Cursor, Claude Desktop, Claude Code, Codex or any stdio client, including verification and troubleshooting.
+- [`docs/agent-setup.md`](docs/agent-setup.md): a step-by-step runbook for installing this server and registering it with Cursor, Claude Desktop, Claude Code, Codex, opencode or any stdio client, including verification and troubleshooting.
 - [`docs/agent-usage.md`](docs/agent-usage.md): how to use the tools well. It covers screenshot coordinate scaling, presets, per-call overrides, when to set `typo_rate` to 0, hotkeys, scrolling, the fail-safe, and example sequences.
 - [`.cursor/skills/continuous-computer-use/`](.cursor/skills/continuous-computer-use/SKILL.md): a Cursor skill for long-running ("24/7") computer use.
   - It runs a recursive observe → decide → act → verify loop over a task queue (`tasks.md`) and persists its state (`state.md`), so it resumes across ticks and sessions.
@@ -36,21 +36,23 @@ If you are an AI coding agent (Cursor, Claude Code, Codex, …):
 4. [MCP client configuration](#mcp-client-configuration)
 5. [Tool reference](#tool-reference)
 6. [Configuration reference](#configuration-reference)
-7. [Safety and the fail-safe](#safety-and-the-fail-safe)
-8. [DPI scaling and multiple monitors](#dpi-scaling-and-multiple-monitors)
-9. [Running the tests](#running-the-tests)
-10. [Measured realism](#measured-realism)
-11. [Troubleshooting](#troubleshooting)
-12. [Limitations](#limitations)
-13. [Project layout](#project-layout)
-14. [Credits](#credits)
+7. [Client/model compatibility](#clientmodel-compatibility)
+8. [Safety and the fail-safe](#safety-and-the-fail-safe)
+9. [DPI scaling and multiple monitors](#dpi-scaling-and-multiple-monitors)
+10. [Running the tests](#running-the-tests)
+11. [Measured realism](#measured-realism)
+12. [Troubleshooting](#troubleshooting)
+13. [Limitations](#limitations)
+14. [Project layout](#project-layout)
+15. [Credits](#credits)
 
 ---
 
 ## Features
 
-- **18 tools.**
-  - Screen: `screenshot`, `get_screen_size`, `get_cursor_position`.
+- **21 tools.**
+  - Screen: `screenshot`, `get_screen_size`, `get_cursor_position`, `reset_image_budget`.
+  - Calibration: `calibrate`, `calibrate_submit` (measure the model's click-coordinate convention).
   - Mouse: `mouse_move`, `click` (single, double, or triple), `mouse_down`, `mouse_up`, `drag`, `scroll` (vertical or horizontal).
   - Keyboard: `type_text`, `press_key`, `hotkey`.
   - Utility: `wait`.
@@ -73,7 +75,7 @@ If you are an AI coding agent (Cursor, Claude Code, Codex, …):
 - **Four presets:** `natural` (default), `careful`, `fast`, and `instant` (humanization off).
 - **Safety.**
   - Corner fail-safe, which also aborts long typing jobs between keystrokes.
-  - Coordinates clamped to the desktop.
+  - Screenshot and normalized coordinates outside the image are rejected; screen coordinates are clamped to the desktop.
   - A maximum text length.
   - Mouse buttons are force-released if a drag or click is interrupted.
 - **DPI-aware on Windows**, so screenshots, the mouse, and the keyboard all use the same physical-pixel coordinates.
@@ -269,6 +271,29 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
+### opencode
+
+Add a `local` entry under `mcp` in `~/.config/opencode/opencode.json` or a project `opencode.json`. `command` is an array, and the environment block is called `environment`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "humanlike-computer-use": {
+      "type": "local",
+      "command": ["C:\\Users\\alice\\humanlike-computer-use-mcp\\venv\\Scripts\\python.exe", "-m", "humanlike_mcp.server"],
+      "enabled": true,
+      "timeout": 30000,
+      "environment": {
+        "HUMANLIKE_PRESET": "natural"
+      }
+    }
+  }
+}
+```
+
+The model must be able to see images. See [opencode + abliteration.ai](#opencode--abliterationai) for the `modalities` setting and the coordinate settings that suit open-weight vision models.
+
 ### Using a config file from the client
 
 MCP clients start the server from a working directory you don't control, so `./humanlike.toml` may not be found. Point to the file explicitly with `HUMANLIKE_CONFIG` (as in the Claude example above). Any single setting can also be passed as an environment variable in the `env` block, for example `"HUMANLIKE_TYPING__WPM": "55"`.
@@ -279,7 +304,19 @@ Restart or reload the MCP server in your client after editing its config.
 
 ## Tool reference
 
-**Coordinates.** By default, mouse tools take **pixel coordinates in the most recent screenshot image**, exactly as the agent sees them (`coordinate_space="screenshot"`). The server converts them to physical screen pixels itself. Pass `coordinate_space="screen"` to use physical screen pixels directly; there (0, 0) is the top-left corner of the primary monitor. Every mouse tool result includes `coordinate_space` and `cursor` (`{"screen": [x, y], "screenshot": [x, y]}`). Before the first screenshot, coordinates are treated as screen pixels, and the result includes a `note` saying so.
+**Coordinates.** Mouse tools read `x`/`y` in one of four coordinate spaces, chosen per call with `coordinate_space` or, when omitted, by the `screenshot.coordinate_space` setting (default `"screenshot"`):
+
+| Space | x/y mean | Valid range |
+| --- | --- | --- |
+| `"screenshot"` (default) | Pixels in the most recent screenshot image, exactly as the model sees them. The server converts them to the screen. | `0..image_width-1`, `0..image_height-1` |
+| `"normalized"` | A 0–1000 grid over the most recent screenshot (0,0 top-left, 1000,1000 bottom-right, 500,500 centre), independent of the image size. This is the native output of Qwen3-VL-style models, GLM-4.xV, Gemini and Gemma 4. | `0..1000` on both axes |
+| `"screen"` | Physical screen pixels; (0, 0) is the top-left corner of the primary monitor, other monitors may be negative. | Anything; clamped to the desktop |
+| `"calibrated"` | The model's own convention, measured with [`calibrate` / `calibrate_submit`](#calibration) and stored as a linear map in `screenshot.calibration`. | Whatever maps onto the latest screenshot (named in its first line) |
+
+- **Out-of-range `"screenshot"` / `"normalized"` / `"calibrated"` coordinates are rejected**, never clamped. The error names the valid range and the image and screen sizes, says nothing was done, and suggests the space the numbers probably belong to (for example `coordinate_space="screen"` when they fit the screen but not the image). It also suggests running `calibrate`; from the second out-of-range call in a session that suggestion becomes explicit.
+- Every mouse tool result includes `coordinate_space` (the one actually used) and `cursor` (`{"screen": [x, y], "screenshot": [x, y], "normalized": [x, y]}`, plus `"calibrated"` when that is the default space). Coordinates may be fractional.
+- Before the first screenshot, `"screenshot"` coordinates are treated as screen pixels and the result includes a `note` saying so; `"normalized"` and `"calibrated"` coordinates are an error until a screenshot exists.
+- The server instructions and the `screenshot` tool description name this machine's primary monitor size, the default screenshot size and the default coordinate space, so the model knows them before its first call.
 
 **Shared optional arguments on action tools:**
 
@@ -288,7 +325,7 @@ Restart or reload the MCP server in your client after editing its config.
 | `humanize` (bool) | `false` skips all human-like timing for this call (instant move, no pauses, no typos). |
 | `speed` (number > 0, ≤ 20) | Mouse speed multiplier for this call (`mouse_move`, `click`, `drag`). |
 | `overrides` (object) | Any setting for this call only, by dotted key, e.g. `{"mouse.wind": 6, "click.hold_ms": [90, 130]}`. |
-| `coordinate_space` (`"screenshot"` / `"screen"`) | Mouse tools only. `"screenshot"` (default): x/y are pixels in the latest screenshot. `"screen"`: physical screen pixels. |
+| `coordinate_space` (`"screenshot"` / `"normalized"` / `"screen"` / `"calibrated"`) | Mouse tools only. Omit to use the `screenshot.coordinate_space` setting. See the table above. |
 
 Per-call values never persist. Invalid values return a clear error and nothing happens.
 
@@ -296,20 +333,39 @@ Per-call values never persist. Invalid values return a clear error and nothing h
 
 | Tool | Parameters | Returns |
 | --- | --- | --- |
-| `screenshot` | `monitor=1` (1 = primary, 2… = others, 0 = all monitors / virtual desktop), `max_width=1280` (downscale to at most this width, ≥ 64; `null` = full resolution), `format="png"` (`png` or `jpeg`), `quality=80` (JPEG only, 1–95) | JSON metadata first, then the image. The metadata has `screen_resolution` (e.g. `"2560x1440"`), `image_size` (e.g. `"1280x720"`), `image_width`, `image_height`, `region` (the captured area in screen pixels), `scale`, `cursor_screen`, and `cursor_screenshot` (`null` if the cursor is outside the capture). This screenshot becomes the reference for `coordinate_space="screenshot"`. |
+| `screenshot` | `monitor=1` (1 = primary, 2… = others, 0 = all monitors / virtual desktop), `max_width` (omit = `screenshot.max_width`, default 1280; `0` = full resolution; otherwise ≥ 64), `format="png"` (`png` or `jpeg`), `quality=80` (JPEG only, 1–95), `image=true` (`false` = metadata only, no image), `grid` (omit = `screenshot.grid`; labeled grid lines every N units of the active coordinate space, `0` = off, otherwise ≥ 10) | One text block, then the image. The text starts with a **plain-text line** such as `Screenshot 1280x720 of a 2560x1440 screen (monitor 1, top-left at screen 0,0). Click coordinates (coordinate_space="screenshot"): pixels in this image, x 0..1279, y 0..719.` (worded for the active space), then a line telling the model not to guess coordinates if it cannot see the image, then JSON metadata: `screen_resolution`, `image_size`, `image_width`, `image_height`, `region` (the captured area in screen pixels), `scale`/`scale_x`/`scale_y`, `coordinate_space`, `valid_range`, `grid` (when on), `cursor_screen`, `cursor_screenshot` and `cursor_normalized` (`null` if the cursor is outside the capture). This screenshot becomes the reference for `"screenshot"` and `"normalized"` coordinates. With `image=false`, only the text comes back (header plus `screen_resolution`, `region`, `coordinate_space`, cursor positions, `reference_image_size`), and the coordinate reference stays on the last screenshot that had an image. The result never carries `structuredContent`, because some clients (opencode ≥ 1.17.5) then drop the image. With `screenshot.max_session_images` set, the text also reports the remaining image budget, and once it is used up the call returns the metadata-only result with an "Image budget reached" note instead of an image. |
 | `get_screen_size` | none | `resolution` (`"WxH"`) and `width`/`height` of the primary monitor, `virtual_desktop` bounds, and a `monitors` list with each monitor's bounds |
-| `get_cursor_position` | none | `x`, `y` and `screen` in screen pixels, plus `screenshot` (image pixels in the latest screenshot, or `null` if the cursor is outside it) |
+| `get_cursor_position` | none | `x`, `y` and `screen` in screen pixels, plus `screenshot` (image pixels in the latest screenshot) and `normalized` (its 0–1000 grid), each `null` if the cursor is outside it |
 
 ### Mouse
 
 | Tool | Parameters | Notes |
 | --- | --- | --- |
-| `mouse_move` | `x`, `y`, `speed?`, `humanize?`, `overrides?` | Returns `from`, `to` (actual landing point, including jitter), `overshoot`, `points`, `duration_ms`. |
-| `click` | `x?`, `y?`, `button="left"` (`left`/`right`/`middle`), `clicks=1` (1–3), `speed?`, `humanize?`, `overrides?` | Without coordinates it clicks in place. With only one of x/y, the other axis stays where it is. |
-| `mouse_down` | `button="left"`, `x?`, `y?`, `humanize?`, `overrides?` | Press and hold. Pair with `mouse_up`. |
+| `mouse_move` | `x`, `y`, `speed?`, `humanize?`, `coordinate_space?`, `overrides?` | Returns `from`, `to` (actual landing point in screen pixels, including jitter), `overshoot`, `points`, `duration_ms`. |
+| `click` | `x?`, `y?`, `button="left"` (`left`/`right`/`middle`), `clicks=1` (1–3), `speed?`, `humanize?`, `coordinate_space?`, `overrides?` | Without coordinates it clicks in place. With only one of x/y, the other axis stays where it is. |
+| `mouse_down` | `button="left"`, `x?`, `y?`, `humanize?`, `coordinate_space?`, `overrides?` | Press and hold. Pair with `mouse_up`. |
 | `mouse_up` | `button="left"` | Always releases, even when the fail-safe is active. |
-| `drag` | `start_x`, `start_y`, `end_x`, `end_y`, `button="left"`, `speed?`, `humanize?`, `overrides?` | Move to start, press, hold, carry, settle, release. |
-| `scroll` | `amount` (notches, −500…500; vertical: + = up, horizontal: + = right), `x?`, `y?`, `horizontal=false`, `humanize?`, `overrides?` | Optionally moves to (x, y) first. |
+| `drag` | `start_x`, `start_y`, `end_x`, `end_y`, `button="left"`, `speed?`, `humanize?`, `coordinate_space?`, `overrides?` | Move to start, press, hold, carry, settle, release. Both points are validated before anything moves. |
+| `scroll` | `amount` (notches, −500…500; vertical: + = up, horizontal: + = right), `x?`, `y?`, `horizontal=false`, `humanize?`, `coordinate_space?`, `overrides?` | Optionally moves to (x, y) first. |
+
+### Calibration
+
+| Tool | Parameters | Notes |
+| --- | --- | --- |
+| `calibrate` | `monitor=1`, `format="png"` | Returns instructions plus a **synthetic** image (it never captures or touches the real screen) with the same size as a normal screenshot under the current settings. It shows 6 numbered, high-contrast crosshair targets at known, asymmetric positions and asks the model to report each centre as `[x, y]`, "the exact numbers you would pass to click", answering directly from the image. The text deliberately states **no image size and no pixel ranges**: in tests, naming the size made a 0–1000 model squeeze its y values under the image height. It names a 0–1000 grid only as the fallback for a model with no natural convention. |
+| `calibrate_submit` | `points` (`[[x1,y1],...]`, targets in order), `apply=true` | Fits the points per axis (scale and offset, least squares) and compares named conventions: image pixels, 0–1000, 0–1, physical screen pixels, and image pixels after a Qwen-style resize (multiples of 28/32 under common pixel budgets, e.g. a 1280x720 image seen as 1176x672). Returns `matched`, `quality`, `max_error_px` / `rms_error_px` / `per_target_error_px` in screenshot pixels, `max_error_screen_px`, the `fit`, the ranked `hypotheses`, `persist` (`toml` snippet and `env` variables) and `next`. See the acceptance rules below. Nothing changes on an error. |
+
+How `calibrate_submit` decides (tolerance = max(12 px, 1.5% of the longer image side), 19 px at 1280 wide; usable = max(24 px, 3%), 38 px):
+
+1. **Built-in convention first.** If one (`screenshot`, `normalized`, `screen`, …) fits within tolerance, or hits all but at most one target almost exactly (median error ≤ ¼ tolerance), it is used: `quality: "good"`, and the one miss is reported as `ignored_target`. A convention with no free parameters generalises better to real clicks than a free fit through six noisy points.
+2. **Free fit** within tolerance, possibly after ignoring one clear outlier (a target whose y was copied from a neighbour, say): `"good"`, stored as `"calibrated"`.
+3. **Mixed axes get one targeted retry.** If one axis matches a built-in convention exactly and the other doesn't (for example x on 0–1000, y squeezed toward pixels), the first such submission is rejected with a message naming the wrong axis and its range. Later submissions are judged normally.
+4. **Usable** (free fit within the usable bound): applied with `quality: "usable"` and a warning about the expected screen-pixel error.
+5. **Rejected** otherwise. The message asks for target order, crosshair centres and one convention for both axes, says not to resubmit the same points, and suggests pointing on a 0–1000 grid if the model estimated pixels. Points that fit only as `[y, x]` get their own message. From the third failed submission (counted until a success, not per image), the error tells the model to stop calibrating and report that it didn't converge, which ends retry loops.
+
+A successful result's `next` tells the model calibration is done and not to call `calibrate` again.
+
+The fitted map is stored relative to the image size (`calibration_units = "image"`) for pixel-like conventions, so it keeps working when `max_width` changes; fixed grids such as 0–1 use `"absolute"`.
 
 ### Keyboard
 
@@ -336,7 +392,8 @@ Per-call values never persist. Invalid values return a clear error and nothing h
 | --- | --- | --- |
 | `get_config` | none | Every setting with its current value and **source**: `default`, `preset:<name>`, `file:<path>`, `env`, or `runtime`. Also returns the active preset and config file. |
 | `set_config` | `updates` (object of dotted keys to values) | Validated and all-or-nothing: if one value is invalid, nothing changes. Lasts for this server session only. Returns the normalized new values. |
-| `reset_config` | none | Undoes all runtime changes (`set_config` **and** `use_preset`). |
+| `reset_config` | none | Undoes all runtime changes (`set_config` **and** `use_preset`) and resets the image budget counter. |
+| `reset_image_budget` | none | Resets the count of images returned in this server session (see `screenshot.max_session_images`) without touching other settings. Returns `previous`, `used`, `limit`, `remaining`. Meant to be called after the user compacted the conversation or started a new session. |
 | `list_presets` | none | Each preset's description and the settings it changes. |
 | `use_preset` | `name` | Switches the preset layer for this session and clears runtime `set_config` changes. File and environment settings still apply on top. |
 
@@ -412,8 +469,29 @@ Every setting is validated: its type, its allowed range, and `min ≤ max` for r
 | `keys.repeat_gap_ms` | `[60, 160]` | 0–5000 | `HUMANLIKE_KEYS__REPEAT_GAP_MS` |
 | `safety.failsafe` | `true` | bool | `HUMANLIKE_SAFETY__FAILSAFE` |
 | `safety.max_text_length` | `10000` (chars) | 1–1000000 | `HUMANLIKE_SAFETY__MAX_TEXT_LENGTH` |
+| `screenshot.coordinate_space` | `"screenshot"` | `screenshot`, `normalized`, `screen`, `calibrated` | `HUMANLIKE_SCREENSHOT__COORDINATE_SPACE` |
+| `screenshot.max_width` | `1280` (px) | 0 (full resolution) or 64–16384 | `HUMANLIKE_SCREENSHOT__MAX_WIDTH` |
+| `screenshot.snap_multiple` | `0` (off) | 0–256 | `HUMANLIKE_SCREENSHOT__SNAP_MULTIPLE` |
+| `screenshot.grid` | `0` (off) | 0 (off) or 10–1000 | `HUMANLIKE_SCREENSHOT__GRID` |
+| `screenshot.calibration` | `[1.0, 0.0, 1.0, 0.0]` | 4 numbers, each −1000–1000; scales non-zero | `HUMANLIKE_SCREENSHOT__CALIBRATION` (`"sx,ox,sy,oy"`) |
+| `screenshot.calibration_units` | `"image"` | `image`, `absolute` | `HUMANLIKE_SCREENSHOT__CALIBRATION_UNITS` |
+| `screenshot.max_session_images` | `0` (unlimited) | 0–10000 | `HUMANLIKE_SCREENSHOT__MAX_SESSION_IMAGES` |
+| `debug.log_path` | `""` (off) | file path | `HUMANLIKE_DEBUG__LOG_PATH` |
+| `debug.log_text` | `false` | bool | `HUMANLIKE_DEBUG__LOG_TEXT` |
 
-`HUMANLIKE_PRESET` selects the preset and `HUMANLIKE_CONFIG` points to the TOML file. What each setting means is described in [How the humanization works](#how-the-humanization-works).
+`HUMANLIKE_PRESET` selects the preset and `HUMANLIKE_CONFIG` points to the TOML file. What each humanization setting means is described in [How the humanization works](#how-the-humanization-works). The `screenshot` settings:
+
+- `coordinate_space`: how mouse tools read x/y when a call omits `coordinate_space` (see [Tool reference](#tool-reference)). The screenshot's first line, the server instructions and the tool descriptions follow it.
+- `max_width`: the default screenshot width when the `screenshot` call omits `max_width`. Smaller images cost fewer tokens and are less likely to be shrunk again by the client or provider.
+- `snap_multiple`: rounds the image width and height **down** to a multiple of this value (28 for Qwen2.5-VL and UI-TARS-1.5, whose image processors resize to multiples of 28; 32 for Qwen3-VL). The model then works on exactly the image the server sent, so pixel coordinates need no correction. Width and height may then scale slightly differently; the server tracks both.
+- `grid`: draws faint magenta lines with yellow-on-black labels every N units of the active coordinate space (image pixels, 0–1000 grid units, or screen pixels). The labels are valid coordinates, which helps weaker models read positions. It covers some pixels, so leave it off for models that ground well.
+- `max_session_images`: how many images (`screenshot` with an image, and `calibrate`) this server process returns before it stops attaching them. While budget remains, each image result says how many are left. Once it is used up, `screenshot` returns its metadata-only result with a note telling the model to ask you to compact or start a new session and then call `reset_image_budget`, and `calibrate` refuses. `image=false` screenshots are always free. Use it when the provider caps images per request and you can't install the [opencode plugin](#image-limit-more-images-than-the-limit-of-4); with the plugin installed, leave it at `0`.
+- `calibration` / `calibration_units`: the map used by `coordinate_space = "calibrated"`, written by `calibrate_submit`. The fraction of the image width is `sx * X + ox` (height: `sy * Y + oy`), where `X = (x + 0.5) / image_width` with `"image"` units and `X = x` with `"absolute"` units.
+
+The `debug` settings:
+
+- `log_path`: when set, the server appends one JSON line per event to this file (parent folders are created). Events: `screenshot` (image size, region, scale, active space), `mouse` (tool, raw x/y, coordinate space, mapped screen x/y, whether they were in bounds, or the error), `type_text` (`text_length` only), `calibrate` (image size, true target centres) and `calibrate_submit` (points, match, residual). Write errors are reported once on stderr and never fail a tool.
+- `log_text`: also log the typed text. Off by default; leave it off when the agent types passwords.
 
 ### TOML example
 
@@ -467,6 +545,143 @@ Paste-speed typing for one call:
 
 ---
 
+## Client/model compatibility
+
+When a model describes the screen correctly but its clicks land in the wrong place, it is answering in a different coordinate convention than the server expects: 0–1000 instead of pixels, pixels of an image its provider resized, and so on. Vision models rarely know which one they use, and providers rarely document it, so **measure it**:
+
+1. Ask the model to call `calibrate`. It gets a synthetic image the size of a normal screenshot with six numbered targets.
+2. It reports the target centres to `calibrate_submit` exactly as it would click them.
+3. The server fits the points, names the matching convention (or a custom linear map), makes it the session default and prints the TOML / env values to make it permanent.
+
+From then on the model keeps answering the way it naturally does, and the server converts. Out-of-range errors suggest calibrating, and the server instructions tell the model to calibrate once when clicks land off-target. Set `HUMANLIKE_DEBUG__LOG_PATH` to see exactly what the model sent and where each click went.
+
+If a model can't see images at all (some clients replace MCP images for models they consider text-only), it can't calibrate either: the screenshot's second line tells it to say so instead of guessing.
+
+If you already know the model family, you can skip calibration and pick the space directly:
+
+| Model family | Native click/box coordinates | Suggested settings |
+| --- | --- | --- |
+| Claude, GPT-4o/5, most general models | Pixels in the image as received | `coordinate_space="screenshot"` (default) |
+| Qwen2.5-VL and fine-tunes (UI-TARS-1.5, many abliterated "VL" models) | Absolute pixels of the image **after** the processor resizes it to multiples of 28 ([Qwen blog](https://qwenlm.github.io/blog/qwen2.5-vl/), [UI-TARS coordinates](https://github.com/bytedance/UI-TARS/blob/main/README_coordinates.md)) | `"screenshot"` with `snap_multiple = 28` |
+| Qwen2-VL, Qwen3-VL, Qwen3.5 (multimodal) | 0–1000 relative grid ([Qwen3-VL #1521](https://github.com/QwenLM/Qwen3-VL/issues/1521)) | `"normalized"` |
+| GLM-4.1V / 4.5V / 4.6V | 0–1000 (GUI agent prompts use 0–999) ([GLM-V](https://github.com/zai-org/GLM-V)) | `"normalized"` |
+| Gemini, Gemma 4 | `box_2d` on a 0–1000 grid ([Gemma 4 blog](https://huggingface.co/blog/gemma4)) | `"normalized"` |
+| UI-TARS v1 (7B-DPO etc.) | 0–1000 relative ([UI-TARS #173](https://github.com/bytedance/UI-TARS/issues/173)) | `"normalized"` |
+| abliteration.ai `abliterated-model` | 0–1000 (measured, [below](#measured-abliterated-model)) | `"normalized"` |
+
+Whatever the setting, the model can always pass `coordinate_space` per call, and an out-of-range value returns an error that suggests the right space. If a weaker model misreads positions, turn on `screenshot.grid` (e.g. `100` in `"normalized"` space, or `200` in `"screenshot"` space) so it can read coordinates off labeled lines.
+
+### opencode + abliteration.ai
+
+[abliteration.ai](https://docs.abliteration.ai/models) (often called "abliterated.ai") serves three models through an OpenAI-compatible API at `https://api.abliteration.ai/v1`. It is a built-in opencode provider via models.dev.
+
+| Model | Images | Notes |
+| --- | --- | --- |
+| `abliterated-model` | **Yes** | Multimodal base model, 256K context. The only one that can see screenshots. Its base model isn't named. **Measured: it points on a 0–1000 grid** (10 calibration runs through opencode 2.0.27; see [Measured: abliterated-model](#measured-abliterated-model)). Use `coordinate_space = "normalized"`. |
+| `abliterated-model-large-v2` | **No** (text-only, GLM-5.3) | The model abliteration.ai's [opencode guide](https://docs.abliteration.ai/integrations/opencode) recommends picking. It rejects image input with HTTP 400. |
+| `abliterated-model-large` | **No** (text-only, GLM-5.2) | Same. |
+
+What opencode does with MCP screenshots:
+
+- **It strips images for models that aren't declared image-capable.** An image is replaced with the text `ERROR: Cannot read image (this model does not support image input). Inform the user.` before the request is sent ([opencode #20802](https://github.com/anomalyco/opencode/issues/20802), [#32832](https://github.com/anomalyco/opencode/issues/32832)). This matters for the large models; `abliterated-model` receives the images.
+- **For OpenAI-compatible providers, MCP images arrive as a separate synthetic user message** after the tool result, because Chat Completions tool messages can't carry images (maintainer comment in [#20802](https://github.com/anomalyco/opencode/issues/20802)). The model still sees the image, but the text header and the image are in different messages. That's why every size and coordinate fact is repeated in plain text.
+- **Since 1.17.5, a tool result that has `structuredContent` loses its image** ([#32832](https://github.com/anomalyco/opencode/issues/32832)). This server's `screenshot` never returns `structuredContent`, so it isn't affected.
+
+Recommended setup:
+
+1. **Use `abliterated-model`** (`/models` → abliteration.ai → *Abliterated Model*), not the large models, for any computer-use session.
+2. **Declare image input and register this server.** Check your version with `opencode --version` and the provider ID with `opencode models` (lines read `provider/model`; on opencode 2.0.27 it is `abliteration-ai/abliterated-model`). Merge into `~/.config/opencode/opencode.json` (Windows: `%USERPROFILE%\.config\opencode\opencode.json`), using the absolute venv Python. The `environment` block already holds the measured setting for `abliterated-model` (step 4).
+
+   **opencode 2.x** (the shape the calibration harness uses and opencode 2.0.27 accepts):
+
+   ```json
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "providers": {
+       "abliteration-ai": {
+         "models": { "abliterated-model": { "capabilities": { "input": ["text", "image"] } } }
+       }
+     },
+     "mcp": {
+       "servers": {
+         "humanlike-computer-use": {
+           "type": "local",
+           "command": ["C:\\Users\\alice\\humanlike-computer-use-mcp\\venv\\Scripts\\python.exe", "-m", "humanlike_mcp.server"],
+           "environment": {
+             "HUMANLIKE_SCREENSHOT__MAX_WIDTH": "1280",
+             "HUMANLIKE_SCREENSHOT__COORDINATE_SPACE": "normalized"
+           }
+         }
+       }
+     }
+   }
+   ```
+
+   **opencode 1.x:** the same values under `"provider"` → `"abliteration"` → `"models"` → `"abliterated-model"` → `"modalities": {"input": ["text","image"], "output": ["text"]}`, and the server directly under `"mcp"` → `"humanlike-computer-use"` with `"type": "local"`, `"command"`, `"enabled": true`, `"timeout": 30000` (opencode's 5 s default for listing tools can be too short for a cold Python start) and the same `"environment"`.
+
+   Restart opencode after editing the config.
+3. **Calibrate** (for another model, or to re-check). In a new opencode session, send:
+
+   > Call the calibrate tool, then call calibrate_submit with the centre of each numbered target exactly as you would pass it to click. Report the tool's result (matched convention and max_error_px).
+
+   A good result has `quality: "good"` and names the convention in `matched`, for example `0-1000 normalized grid` or `pixels of the image resized to …`. It applies for the rest of the session. `"usable"` is applied too, but `max_error_screen_px` says how far clicks may land off. If the server answers with an axis message ("Your x values match … but your y values do not"), the model gets one retry with the corrected axis. If calibration doesn't converge after three submissions, the server tells the model to stop; start a new session and try once more.
+4. **Make it permanent.** Copy the `persist.env` values from the result into the `environment` block (or `persist.toml` into a `humanlike.toml` that `HUMANLIKE_CONFIG` points to). For a built-in match that is only `HUMANLIKE_SCREENSHOT__COORDINATE_SPACE`. For **`abliterated-model` it is `"normalized"`**, already in the example above. A free fit adds the map, for example:
+
+   ```json
+   "HUMANLIKE_SCREENSHOT__COORDINATE_SPACE": "calibrated",
+   "HUMANLIKE_SCREENSHOT__CALIBRATION": "1.172161,0.0,1.168831,0.0",
+   "HUMANLIKE_SCREENSHOT__CALIBRATION_UNITS": "image"
+   ```
+
+   Calibrate again after switching models. Don't leave a model that points on 0–1000 on the default `"screenshot"` space: its header says "pixels in this image, y 0..719", and the measured hit rate was 0%.
+5. **Check the debug log** if clicks are still off: add `"HUMANLIKE_DEBUG__LOG_PATH": "C:\\Users\\alice\\humanlike-debug.jsonl"` to `environment`. Each `mouse` line in the `HUMANLIKE_DEBUG__LOG_PATH` file shows the raw x/y the model sent, the coordinate space used, the mapped screen position and whether it was in bounds; each `screenshot` line shows the image size, region and scale. Typed text is logged only as its length. Remove the variable when you're done.
+
+#### Measured: abliterated-model
+
+Ten calibration runs through opencode 2.0.27 against an input-free copy of this server (harness in [`integrations/opencode/calibration-test/`](integrations/opencode/calibration-test/)). Monitor 1920x1080, calibration image 1280x720.
+
+- **It points on a 0–1000 grid, very precisely, when it answers directly.** x matched 0–1000 within about 1 unit in every run.
+- **It sometimes squeezes y toward pixels.** In 4 of the 10 runs, y values for targets in the lower half came out under the image height (600 for a target at 860 on the 0–1000 scale). This happened most when the text named the image size ("1280x720"), and the model then "corrected" values above 720. The calibration prompt therefore names no size, and the server answers this pattern with an axis-specific retry.
+- **Pixel guessing is imprecise.** In one run it estimated image pixels instead, 40–100 px off. That is rejected with a suggestion to point on a 0–1000 grid.
+
+Click accuracy, measured offline by mapping every point the model reported to screen pixels and comparing with the true target centres (`accuracy.py` in the harness; screen pixels on 1920x1080):
+
+| When the model points natively (0–1000) | Median error | 32 px icon hit | 100x32 button hit |
+|---|---|---|---|
+| Server on the default `"screenshot"` space | 324 px | 0% | 0% |
+| `coordinate_space = "normalized"` | 3 px | 83% | 93% |
+
+To repeat the measurement (it uses your stored opencode credentials and API credits, and never sends input): `run.py serve` starts a private `opencode serve` on port 4917 with a generated config whose only tools are `calibrate`, `calibrate_submit`, `get_config`, `get_screen_size` and a text-only `screenshot`; opencode's shell, edit and write tools are denied. `run.py audit` dumps the tools the model would get and aborts before the provider is called; run it until it lists `humanlike-calib (5 tools)`, because the first request after a start can race the MCP connection. Then `run.py 1` (2, 3, …) runs one calibration prompt, `accuracy.py` reports click accuracy, and `run.py stop` stops the private server only. Config, transcripts and logs go to `.calib-runs/`, which is git-ignored.
+
+**Setting for `abliterated-model`:** `HUMANLIKE_SCREENSHOT__COORDINATE_SPACE=normalized` (no calibration vector needed). With it, the screenshot header says "a 0–1000 grid over this image, not pixels; y 0..1000", which matches what the model does natively.
+
+#### Image limit: "more images than the limit of 4"
+
+`Error: This request has more images than the limit of 4. Send fewer images and try again.` comes from the provider, not from this server. opencode re-sends every earlier screenshot in the conversation with each request, so the fifth image in a session breaks every later turn. abliteration.ai doesn't publish a hard number; its [vision docs](https://abliteration.ai/docs/vision) say to keep it "≤4" per request, and its [multimodal page](https://abliteration.ai/multimodal-llm-api) says "the effective image count depends on your plan and project settings". Its other models are text-only ([images docs](https://docs.abliteration.ai/capabilities/images)), so switching models doesn't help. An MCP server can't edit the client's history, so the fix belongs in opencode:
+
+1. **Install the bundled plugin** [`integrations/opencode/plugins/keep-last-images.ts`](integrations/opencode/plugins/keep-last-images.ts). It keeps only the newest 3 images in each request. Older screenshot results keep their text, with `[older screenshot removed to stay under the provider's image limit]` instead of the image. It edits only the per-request copy of the messages, so the stored session is unchanged, and it also unblocks a session that already hit the error. Copy it into opencode's plugin folder and restart opencode:
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins" | Out-Null
+   Copy-Item integrations\opencode\plugins\keep-last-images.ts "$env:USERPROFILE\.config\opencode\plugins\"
+   ```
+
+   On macOS/Linux: `mkdir -p ~/.config/opencode/plugins && cp integrations/opencode/plugins/keep-last-images.ts ~/.config/opencode/plugins/`. Files in `~/.config/opencode/plugins/` (global) or `<project>/.opencode/plugins/` load automatically at startup ([plugin docs](https://opencode.ai/docs/plugins/)); no `opencode.json` entry is needed. To keep a different number of images, set `OPENCODE_KEEP_LAST_IMAGES` (e.g. `2`) in the shell that starts opencode.
+
+   **opencode version.** Check it with `opencode --version`. The plugin API changed between major versions, and each version needs its own file:
+
+   | opencode | File to install | Plugin API |
+   |---|---|---|
+   | 2.x (checked against 2.0.27) | `integrations/opencode/plugins/keep-last-images.ts` | default export `{ id, setup }`; `setup(api)` registers `api.session.hook("context" \| "compaction" \| "generate", fn)`, and `fn` rewrites `event.messages` (`LLM.Message` objects with `content` parts: `media` for user images, `tool-result` → `result.value[]` `file` parts for tool images) |
+   | 1.x | `integrations/opencode/legacy-1.x/keep-last-images.ts` | named plugin function returning the `experimental.chat.messages.transform` hook ([hook type in `@opencode-ai/plugin`](https://cdn.jsdelivr.net/npm/@opencode-ai/plugin/dist/index.d.ts), [PR #5207](https://github.com/anomalyco/opencode/pull/5207)) |
+
+   Installing the 1.x file on opencode 2.x fails at startup with `Plugin must export a default definition with an id and an effect or setup function.` The 2.x loader accepts only that default export. The 1.x loader calls every export as a plugin function, so one file can't serve both versions. Install exactly one of them, under the name `keep-last-images.ts`. The 2.x API was read from the code bundled in the installed `@opencode/cli` 2.0.27; it has no published type package, so a later 2.x release could change it. Both files are unit-tested against those message shapes, but not against a running opencode.
+2. **Optional server-side budget** for setups without the plugin: `"HUMANLIKE_SCREENSHOT__MAX_SESSION_IMAGES": "3"` in `environment`. After 3 images the server stops attaching images and tells the model to ask you to `/compact` or `/new`. It counts per server process, not per opencode session, so the model calls `reset_image_budget` after you've compacted or started over.
+3. **opencode's built-in options don't target image counts.** `compaction.auto` (default `true`) only compacts when the context window is full, and `compaction.prune` (default `false`) clears old tool outputs, including their images, only beyond a token threshold ([config docs](https://opencode.ai/docs/config/#compaction)). Turning `prune` on doesn't hurt, but don't rely on it for a 4-image cap. There is no setting to keep only the last N images.
+4. **A session that is already stuck** recovers as soon as the plugin is installed and opencode restarted: reopen it with `/sessions` and continue. Without the plugin, start a fresh session with `/new` (alias `/clear`). `/compact` (alias `/summarize`) replaces the history with a summary, but on some opencode versions the summarizing request itself still carries the old images and fails the same way. `/undo` removes the last turn and its screenshot.
+
+---
+
 ## Safety and the fail-safe
 
 - **Corner fail-safe.** If the cursor sits in any corner pixel of the **primary** monitor, every mouse action and every keystroke aborts with:
@@ -475,7 +690,7 @@ Paste-speed typing for one call:
   The check runs at every point of a mouse path (through pyautogui) and **between every keystroke** of `type_text`, so long typing jobs can be stopped too. Move the cursor away from the corner to continue.
 - **Disabling it** is not recommended. You can set `safety.failsafe=false`, `HUMANLIKE_SAFETY__FAILSAFE=0`, or `set_config({"safety.failsafe": false})`.
 - **No stuck keys or buttons.** Clicks and drags force-release the mouse button if interrupted. `type_text` always releases Shift, and `hotkey` always releases every key it pressed. `mouse_up` works even while the fail-safe is active.
-- **Coordinate clamping.** Targets are clamped to the virtual desktop. While the fail-safe is on, targets are also nudged 1 px off the exact corner pixels, so the server never trips its own fail-safe.
+- **Coordinate checks.** Screenshot-space and normalized coordinates outside the latest screenshot are rejected with an error before anything moves. Targets are clamped to the virtual desktop. While the fail-safe is on, targets are also nudged 1 px off the exact corner pixels, so the server never trips its own fail-safe.
 - **Limits.**
   - `type_text` refuses text longer than `safety.max_text_length` (10,000).
   - `scroll` accepts up to ±500 notches.
@@ -488,7 +703,7 @@ Paste-speed typing for one call:
 ## DPI scaling and multiple monitors
 
 - **DPI.** At startup, and before `pyautogui` is imported, the server calls `SetProcessDpiAwareness(2)` (per-monitor DPI aware). Screenshots, cursor positions, and mouse moves then all use **physical pixels**. On a 4K screen at 150% scaling, `get_screen_size` reports 3840×2160, and screenshot pixel (x, y) is screen pixel (x, y) when not downscaled.
-- **Downscaled screenshots.** Screenshots default to 1280 px wide, because some MCP clients silently shrink larger images, which would make the model's coordinates wrong. With the default `coordinate_space="screenshot"`, the server maps image pixels back to the screen itself. With `coordinate_space="screen"`, use `screen_x = region.left + image_x * scale`, and the same for y.
+- **Downscaled screenshots.** Screenshots default to 1280 px wide (`screenshot.max_width`), because some MCP clients silently shrink larger images, which would make the model's coordinates wrong. With `coordinate_space="screenshot"` or `"normalized"`, the server maps coordinates back to the screen itself. With `coordinate_space="screen"`, use `screen_x = region.left + image_x * scale_x` and `screen_y = region.top + image_y * scale_y`.
 - **Multiple monitors.**
   - `screenshot(monitor=0)` captures the whole virtual desktop, and `region` tells you where it starts. On some layouts that is at negative coordinates. Screenshot-space clicks are mapped into whichever monitor or area the latest screenshot captured.
   - `monitor=1` is the primary monitor and `2…` are the others. `get_screen_size` lists every monitor's bounds.
@@ -512,7 +727,11 @@ The suite runs in about 7 seconds and **never sends real input**. The mouse and 
 | `test_config.py` | Defaults, the example TOML matching the defaults, presets, every layer and its reported source, environment parsing, validation errors, atomic `set_config`, `use_preset`/`reset_config` |
 | `test_mouse.py` | Move, clamp, and corner nudging; overshoot and correction; speed scaling; click order and hold times; double-click gap; drag sequence; button release when the fail-safe trips mid-drag; scroll notches |
 | `test_keyboard.py` | Typed output equal to the input despite typos; balanced press/release; Shift held across capitals; typo-then-Backspace sequences; Unicode; fail-safe abort that releases Shift; hotkey order and reverse release (also when a press fails); key-name normalization |
-| `test_server.py` | All 18 tools listed; config tools; actions routed to backends; fail-safe and validation surfaced as tool errors; real screenshots in-process; and an **end-to-end stdio session** through the official MCP client (initialize, list tools, `get_config` showing an env-layer value, `get_screen_size`, `screenshot`, an invalid `set_config`) |
+| `test_calibration.py` | The calibration image (right size and format, target centres, no screen capture or input); fits for image pixels, 0–1000, 0–1, smart-resize and arbitrary resized pixels, and noisy points; real abliterated-model submissions (copied y ignored as an outlier, built-in convention preferred over an overfitted free fit, mixed-axis retry hint, imprecise pixel guesses rejected); `good` / `usable` tiers, the failure cap and stop message, no image size in the prompt; rejection of inconsistent and swapped points; applying, persisting (TOML and env round trip) and reusing the calibration after a `max_width` change; the calibrated space in click, drag and scroll; the repeated-error hint; debug log records and `type_text` redaction |
+| `test_image_budget.py` | `screenshot.max_session_images`: countdown lines, metadata-only results once used up, free `image=false` shots, `calibrate` counting and refusing, `reset_image_budget` and `reset_config`, runtime changes to the limit |
+| `test_safe_server.py` | The input-free calibration launcher in `integrations/opencode/calibration-test/`: its mouse and keyboard backends refuse every call, and a real stdio session lists only read-only tools, returns text-only screenshots and rejects `click` |
+| `test_opencode_plugin.py` | Runs `integrations/opencode/keep-last-images.test.mjs` under Node (skipped without Node ≥ 22.18): opencode 2.x plugin (default `{ id, setup }` export, `context`/`compaction`/`generate` hooks, newest-N pruning of `media` and `tool-result` images, immutable message replacement, `keep` option and env var) and the 1.x legacy plugin (exports only functions, in-place transform) |
+| `test_server.py` | All 21 tools listed; config tools; actions routed to backends; fail-safe and validation surfaced as tool errors; real screenshots in-process (header line, snapping, grid, config-driven defaults, no `structuredContent`); screenshot/normalized/screen coordinate mapping and out-of-range rejection; and an **end-to-end stdio session** through the official MCP client (initialize with the display hint in the instructions, list tools, `get_config` showing an env-layer value, `get_screen_size`, `screenshot`, an invalid `set_config`) |
 | `test_live.py` | **Opt-in** real-desktop smoke test. It moves the cursor about 60 px and back, takes a screenshot, and reads the cursor position. It never clicks or types. |
 
 Run the live test:
@@ -559,6 +778,12 @@ At 70 WPM, the median keystroke interval is about 117 ms (10th percentile 72 ms,
 | --- | --- |
 | Tool error "Fail-safe triggered" | The cursor is in a primary-screen corner. Move it away. To disable the fail-safe (not recommended), see [Safety](#safety-and-the-fail-safe). |
 | Clicks land in the wrong place on a scaled display | Pass pixel coordinates from the **latest** screenshot with the default `coordinate_space="screenshot"`, and don't scale them yourself. Check `cursor.screenshot` in the result. Keep `max_width` at 1280 or lower so the client doesn't shrink the image further. The server is DPI aware, so `get_screen_size` should report the physical resolution. If another tool in the same process set DPI awareness first, restart the server. |
+| Error "… is outside the valid range for coordinate_space=…" | The model used a different convention than the active space (often screen pixels or a 0–1000 grid). Have it run `calibrate` and `calibrate_submit`, or set `screenshot.coordinate_space` to the model's native convention; see [Client/model compatibility](#clientmodel-compatibility). |
+| The model describes the screen correctly but clicks land off-target (by a fixed factor, or drifting toward one corner) | Coordinate convention mismatch. Run [calibration](#calibration) and persist the values it prints. Set `HUMANLIKE_DEBUG__LOG_PATH` to see the raw coordinates and where they were mapped. |
+| `This request has more images than the limit of 4` (opencode + abliteration.ai, or another provider with an image cap) | The client re-sends every earlier screenshot. Install the [keep-last-images opencode plugin](#image-limit-more-images-than-the-limit-of-4), restart opencode and continue the session; or start a new session with `/new`. Without the plugin, set `HUMANLIKE_SCREENSHOT__MAX_SESSION_IMAGES=3`. |
+| A screenshot says "Image budget reached" | `screenshot.max_session_images` is used up. Run `/compact` or `/new` in the client, then let the model call `reset_image_budget` (or raise the limit). |
+| `calibrate_submit` says the points are inconsistent | The model misread the targets, reported them out of order, or estimated pixels. Follow the error: one convention for both axes, or point on a 0–1000 grid. After three failed submissions the server tells the model to stop; start a new session and calibrate once more. If the model's family is known, set `coordinate_space` from the [table](#clientmodel-compatibility) instead. |
+| The model can't describe what's on the screen | It isn't receiving the image. In opencode, use an image-capable model and declare `modalities.input: ["text", "image"]`; see [opencode + abliteration.ai](#opencode--abliterationai). |
 | Nothing happens in an elevated (Administrator) window | Windows blocks input from a normal-privilege process into elevated windows (UIPI). Run the MCP client as Administrator, or avoid elevated targets. |
 | Typing goes to the wrong window | Input goes to the focused window. Click into the target field first. |
 | Wrong characters typed | Characters are resolved for the **active** keyboard layout. Characters missing from it are sent as Unicode, which some apps (games, remote desktops, some terminals) ignore. Typos are simulated with a QWERTY neighbour map whatever the layout. |
@@ -595,10 +820,16 @@ humanlike-computer-use-mcp/
 ├── pyproject.toml              # deps + console script humanlike-computer-use-mcp
 ├── humanlike.example.toml      # every setting with its default
 ├── README.md
+├── integrations/opencode/
+│   ├── plugins/keep-last-images.ts  # opencode 2.x plugin: keep only the newest N images per request
+│   ├── legacy-1.x/keep-last-images.ts  # same plugin for opencode 1.x
+│   ├── keep-last-images.test.mjs    # node --test suite for both
+│   └── calibration-test/            # isolated, input-free opencode harness for calibration runs
 ├── scripts/
 │   └── realism_report.py       # simulated duration / speed-profile / WPM report
 ├── src/humanlike_mcp/
-│   ├── server.py               # MCPServer app, the 18 tools, entry point
+│   ├── server.py               # MCPServer app, the 21 tools, entry point
+│   ├── calibration.py          # calibration image, convention fitting (pure)
 │   ├── config.py               # frozen dataclass settings, presets, layered loading
 │   ├── humanize.py             # pure timing/randomness models (paths, typing plan, typos, scroll)
 │   ├── mouse.py                # WindMouse paths replayed via pyautogui; clicks, drag, scroll

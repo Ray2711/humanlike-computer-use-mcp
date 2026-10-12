@@ -23,7 +23,8 @@ For continuous or scheduled ("24/7") computer use, use the project skill **[.cur
 
 ```
 src/humanlike_mcp/
-  server.py     MCPServer app, 18 tools, main() entry point (python -m humanlike_mcp.server)
+  server.py     MCPServer app, 21 tools, main() entry point (python -m humanlike_mcp.server)
+  calibration.py  pure: synthetic calibration image, coordinate-convention fitting
   config.py     frozen-dataclass settings, presets, layered loading, validation
   humanize.py   pure timing/randomness models (no side effects; unit-tested)
   mouse.py      Mouse + PyAutoGuiBackend (injectable backend)
@@ -33,6 +34,8 @@ src/humanlike_mcp/
 tests/          pytest suite; conftest.py has recording fake backends
 scripts/realism_report.py   simulated timing report (sends no input)
 humanlike.example.toml      every setting with its default
+integrations/opencode/      opencode plugin: plugins/keep-last-images.ts (2.x, default {id, setup} only), legacy-1.x/ (1.x, export only functions) + node test
+integrations/opencode/calibration-test/  input-free opencode calibration harness: safe_server.py, run.py (API credits; user consent only), accuracy.py (offline)
 ```
 
 ## Setup
