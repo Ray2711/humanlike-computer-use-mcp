@@ -13,7 +13,11 @@ How an AI agent should **use** this server's tools effectively and safely. For i
 3. Act: `click`, `type_text`, `hotkey`, `scroll`, …
 4. `wait` briefly if the UI needs time (page loads, animations), then `screenshot` again to confirm the result before the next step.
 
-Don't chain many input actions blindly. Windows move, dialogs pop up, and focus changes.
+**Mandatory: confirm every step with a screenshot before continuing.** After each input action (`click`, `type_text`, `press_key`, `hotkey`, `scroll`, `drag`, `mouse_move`, `mouse_down`/`mouse_up`), take a `screenshot` and check that the step actually did what you expected before you start the next one. Never chain input actions blindly: windows move, dialogs pop up, and focus changes.
+
+- Call `screenshot` only **after** the action has returned. Never issue it in parallel with an action call; it may capture the screen before the action happened.
+- Check the details, not just "something changed". For typed text, read the field and compare it with what you sent. The first keystrokes after a focus change (e.g. clicking a taskbar icon) can be dropped.
+- If the step didn't succeed, fix it (e.g. clear the field and retype), then screenshot again. Only move on once the screenshot confirms the step.
 
 ---
 

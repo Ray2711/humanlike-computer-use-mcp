@@ -15,6 +15,8 @@ A local **stdio MCP server**, written in Python, that drives the **real** mouse 
 To install the server for a user, follow **[docs/agent-setup.md](docs/agent-setup.md)** step by step.
 To use its tools well, read **[docs/agent-usage.md](docs/agent-usage.md)**.
 
+**When driving the desktop through this server, always confirm each step with a `screenshot` before continuing to the next one.** Take it after the input action has returned (never in parallel with it), check that the step really succeeded (e.g. the typed text is complete and correct), and fix and re-check before moving on.
+
 For continuous or scheduled ("24/7") computer use, use the project skill **[.cursor/skills/continuous-computer-use](.cursor/skills/continuous-computer-use/SKILL.md)**. Invoke it with `/continuous-computer-use`, or `/loop 5m /continuous-computer-use`. Its state lives in that folder's `tasks.md` and `state.md`. These are git-ignored working copies; if either is missing, copy it from `tasks.template.md` / `state.template.md` (`Copy-Item <dir>/tasks.template.md <dir>/tasks.md` in PowerShell, `cp` on POSIX) and never overwrite an existing copy. Users edit `tasks.md`, not the template; only change a template to change the defaults for everyone.
 
 ## Layout

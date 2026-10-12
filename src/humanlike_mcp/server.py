@@ -29,7 +29,10 @@ of the primary monitor, and other monitors may have negative coordinates.
 When a screenshot is downscaled, convert image pixels with
 screen_x = region.left + image_x * scale (same for y). Moving the cursor into a corner
 of the primary screen aborts automation (fail-safe). Settings can be changed with
-set_config / use_preset; action tools also accept per-call overrides."""
+set_config / use_preset; action tools also accept per-call overrides.
+After every input action, call screenshot (after the action has returned, never in
+parallel with it) and confirm the step succeeded before starting the next one; if it
+did not (e.g. typed text is incomplete), fix it and screenshot again."""
 
 Button = Literal["left", "right", "middle"]
 Speed = Annotated[float | None, Field(description="Mouse speed multiplier for this call (1.0 = configured speed).", gt=0, le=20)]

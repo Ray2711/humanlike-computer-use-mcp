@@ -90,8 +90,11 @@ Iteration:
 - **Always pass `typo_rate: 0`** for exact text: passwords, codes, URLs, emails, file paths, code, shell commands and form values.
 - Natural typos are fine only for free prose in plain text editors.
 
-**5. Verify.**
-- **Wait for the screen to settle** (see Waiting), then compare the result with the expectation from step 3.
+**5. Verify (mandatory, never skip).**
+- **Always take a screenshot to confirm the step before continuing to the next one.** No action is considered done until a screenshot shows it succeeded.
+- Take the screenshot only after the action call has returned; never run it in parallel with the action.
+- **Wait for the screen to settle** (see Waiting), then compare the result with the expectation from step 3. For typed text, read the field and check it matches exactly; the first keystrokes after a focus change can be dropped.
+- On a mismatch, correct it (e.g. clear and retype) and screenshot again before going on.
 - After `mouse_down`, always end with `mouse_up`, even on failure.
 
 **6. Journal.**
