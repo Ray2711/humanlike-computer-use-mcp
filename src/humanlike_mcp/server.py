@@ -24,17 +24,28 @@ WAIT_POLL_S = 0.2
 
 INSTRUCTIONS = """\
 Computer-use tools that drive the real mouse and keyboard with human-like timing.
-Coordinates are physical screen pixels (the process is DPI aware); (0, 0) is the top-left
-of the primary monitor, and other monitors may have negative coordinates.
-When a screenshot is downscaled, convert image pixels with
-screen_x = region.left + image_x * scale (same for y). Moving the cursor into a corner
+Coordinates: by default (coordinate_space="screenshot") mouse tools take pixel coordinates
+in the most recent screenshot image, exactly as you see them; the server converts them to
+the real screen. Pass coordinate_space="screen" to use physical screen pixels instead
+((0, 0) = top-left of the primary monitor; other monitors may be negative). Every mouse
+result reports the cursor in both spaces. Take a screenshot first (it defaults to the
+primary monitor at 1280 px wide). Moving the cursor into a corner
 of the primary screen aborts automation (fail-safe). Settings can be changed with
 set_config / use_preset; action tools also accept per-call overrides.
 After every input action, call screenshot (after the action has returned, never in
 parallel with it) and confirm the step succeeded before starting the next one; if it
 did not (e.g. typed text is incomplete), fix it and screenshot again."""
 
+DEFAULT_SCREENSHOT_WIDTH = 1280
+
 Button = Literal["left", "right", "middle"]
+CoordinateSpace = Annotated[
+    Literal["screenshot", "screen"],
+    Field(
+        description='"screenshot" (default): x/y are pixels in the latest screenshot image. '
+        '"screen": x/y are physical screen pixels.'
+    ),
+]
 Speed = Annotated[float | None, Field(description="Mouse speed multiplier for this call (1.0 = configured speed).", gt=0, le=20)]
 Humanize = Annotated[bool | None, Field(description="Set false to skip human-like timing for this call.")]
 Overrides = Annotated[
@@ -49,6 +60,7 @@ class Runtime:
     mouse: Mouse
     keyboard: Keyboard
     lock: threading.Lock = field(default_factory=threading.Lock)
+    view: screen.View | None = None
 
 
 _runtime: Runtime | None = None
@@ -99,6 +111,43 @@ def _act(overrides: dict[str, Any] | None, named: dict[str, Any], action: Callab
     return _guard(run)
 
 
+XY = Callable[[int | None, int | None], tuple[int | None, int | None]]
+NO_SCREENSHOT_NOTE = "No screenshot taken yet, so x/y were treated as screen pixels. Call screenshot first."
+
+
+def _cursor(rt: Runtime) -> dict[str, Any]:
+    sx, sy = rt.mouse.position()
+    info: dict[str, Any] = {"screen": [sx, sy]}
+    if rt.view is not None:
+        img = rt.view.to_image(sx, sy)
+        info["screenshot"] = list(img) if img is not None else None
+    return info
+
+
+def _pointer_act(
+    overrides: dict[str, Any] | None,
+    named: dict[str, Any],
+    space: str,
+    action: Callable[[Runtime, Settings, XY], dict[str, Any]],
+) -> dict[str, Any]:
+    def run(rt: Runtime, s: Settings) -> dict[str, Any]:
+        view = rt.view if space == "screenshot" else None
+
+        def xy(x: int | None, y: int | None) -> tuple[int | None, int | None]:
+            if x is None or y is None or view is None:
+                return x, y
+            return view.to_screen(x, y)
+
+        result = action(rt, s, xy)
+        result["coordinate_space"] = "screenshot" if view is not None else "screen"
+        if space == "screenshot" and view is None:
+            result["note"] = NO_SCREENSHOT_NOTE
+        result["cursor"] = _cursor(rt)
+        return result
+
+    return _act(overrides, named, run)
+
+
 mcp = MCPServer("humanlike-computer-use", instructions=INSTRUCTIONS, version=__version__)
 
 
@@ -107,34 +156,52 @@ mcp = MCPServer("humanlike-computer-use", instructions=INSTRUCTIONS, version=__v
 
 @mcp.tool(structured_output=False)
 def screenshot(
-    monitor: Annotated[int, Field(description="0 = all monitors (virtual desktop), 1 = primary, 2.. = others.", ge=0)] = 0,
-    max_width: Annotated[int | None, Field(description="Downscale so the image is at most this wide.", ge=64)] = None,
+    monitor: Annotated[int, Field(description="1 = primary (default), 2.. = others, 0 = all monitors (virtual desktop).", ge=0)] = 1,
+    max_width: Annotated[
+        int | None,
+        Field(description=f"Downscale so the image is at most this wide (default {DEFAULT_SCREENSHOT_WIDTH}; null = full resolution).", ge=64),
+    ] = DEFAULT_SCREENSHOT_WIDTH,
     format: Annotated[Literal["png", "jpeg"], Field(description="Image encoding.")] = "png",
     quality: Annotated[int, Field(description="JPEG quality (1-95).", ge=1, le=95)] = 80,
 ) -> list[Any]:
-    """Capture the screen. Returns the image plus JSON metadata (region offset and scale factor
-    for converting image pixels back to screen coordinates)."""
+    """Capture the screen. Returns JSON metadata (screen resolution, image size, scale, cursor
+    position in screen and image pixels) followed by the image. Mouse tools then accept pixel
+    coordinates from this image directly."""
 
     def run() -> list[Any]:
+        rt = get_runtime()
         shot = screen.capture(monitor, max_width, format, quality)
+        rt.view = shot.view
         meta = shot.metadata()
-        meta["cursor"] = list(get_runtime().mouse.position())
-        return [Image(data=shot.data, format=shot.format), meta]
+        cursor = _cursor(rt)
+        meta["cursor_screen"] = cursor["screen"]
+        meta["cursor_screenshot"] = cursor.get("screenshot")
+        meta["coordinates"] = (
+            "Mouse tools take pixel coordinates in this image by default; "
+            "cursor_screenshot is null when the cursor is outside the captured area."
+        )
+        return [meta, Image(data=shot.data, format=shot.format)]
 
     return _guard(run)
 
 
 @mcp.tool()
 def get_screen_size() -> dict[str, Any]:
-    """Primary monitor size, the virtual desktop bounds, and every monitor's bounds."""
+    """Primary monitor resolution ("WxH"), the virtual desktop bounds, and every monitor's bounds."""
     return _guard(screen.screen_info)
 
 
 @mcp.tool()
-def get_cursor_position() -> dict[str, int]:
-    """Current mouse cursor position in screen pixels."""
-    x, y = _guard(lambda: get_runtime().mouse.position())
-    return {"x": x, "y": y}
+def get_cursor_position() -> dict[str, Any]:
+    """Current cursor position in screen pixels (x, y) and, after a screenshot, in that image's pixels."""
+
+    def run() -> dict[str, Any]:
+        rt = get_runtime()
+        cursor = _cursor(rt)
+        x, y = cursor["screen"]
+        return {"x": x, "y": y, **cursor}
+
+    return _guard(run)
 
 
 # ------------------------------------------------------------------ mouse
@@ -142,16 +209,22 @@ def get_cursor_position() -> dict[str, int]:
 
 @mcp.tool()
 def mouse_move(
-    x: Annotated[int, Field(description="Target x in screen pixels.")],
-    y: Annotated[int, Field(description="Target y in screen pixels.")],
+    x: Annotated[int, Field(description="Target x (screenshot pixels by default).")],
+    y: Annotated[int, Field(description="Target y (screenshot pixels by default).")],
     speed: Speed = None,
     humanize: Humanize = None,
+    coordinate_space: CoordinateSpace = "screenshot",
     overrides: Overrides = None,
 ) -> dict[str, Any]:
     """Move the cursor along a curved, human-like path (WindMouse) with variable speed,
     occasional overshoot-and-correct, and a small landing offset."""
     named = {"mouse.speed": speed, "humanize.enabled": humanize}
-    return _act(overrides, named, lambda rt, s: rt.mouse.move(x, y, s))
+
+    def action(rt: Runtime, s: Settings, xy: XY) -> dict[str, Any]:
+        tx, ty = xy(x, y)
+        return rt.mouse.move(tx, ty, s)
+
+    return _pointer_act(overrides, named, coordinate_space, action)
 
 
 @mcp.tool()
@@ -162,11 +235,17 @@ def click(
     clicks: Annotated[int, Field(description="1 = single, 2 = double, 3 = triple click.", ge=1, le=3)] = 1,
     speed: Speed = None,
     humanize: Humanize = None,
+    coordinate_space: CoordinateSpace = "screenshot",
     overrides: Overrides = None,
 ) -> dict[str, Any]:
     """Click with a human hesitation before pressing and a natural press duration."""
     named = {"mouse.speed": speed, "humanize.enabled": humanize}
-    return _act(overrides, named, lambda rt, s: rt.mouse.click(x, y, s, button=button, clicks=clicks))
+
+    def action(rt: Runtime, s: Settings, xy: XY) -> dict[str, Any]:
+        tx, ty = xy(x, y)
+        return rt.mouse.click(tx, ty, s, button=button, clicks=clicks)
+
+    return _pointer_act(overrides, named, coordinate_space, action)
 
 
 @mcp.tool()
@@ -175,17 +254,23 @@ def mouse_down(
     x: Annotated[int | None, Field(description="Optionally move here first.")] = None,
     y: Annotated[int | None, Field(description="Optionally move here first.")] = None,
     humanize: Humanize = None,
+    coordinate_space: CoordinateSpace = "screenshot",
     overrides: Overrides = None,
 ) -> dict[str, Any]:
     """Press and hold a mouse button (pair with mouse_up)."""
     named = {"humanize.enabled": humanize}
-    return _act(overrides, named, lambda rt, s: rt.mouse.button_down(button, s, x, y))
+
+    def action(rt: Runtime, s: Settings, xy: XY) -> dict[str, Any]:
+        tx, ty = xy(x, y)
+        return rt.mouse.button_down(button, s, tx, ty)
+
+    return _pointer_act(overrides, named, coordinate_space, action)
 
 
 @mcp.tool()
 def mouse_up(button: Button = "left") -> dict[str, Any]:
     """Release a mouse button (always allowed, even while the fail-safe is active)."""
-    return _act(None, {}, lambda rt, s: rt.mouse.button_up(button, s))
+    return _pointer_act(None, {}, "screen", lambda rt, s, xy: rt.mouse.button_up(button, s))
 
 
 @mcp.tool()
@@ -197,11 +282,18 @@ def drag(
     button: Button = "left",
     speed: Speed = None,
     humanize: Humanize = None,
+    coordinate_space: CoordinateSpace = "screenshot",
     overrides: Overrides = None,
 ) -> dict[str, Any]:
     """Drag from start to end: move to start, press, pause, carry along a slower human path, settle, release."""
     named = {"mouse.speed": speed, "humanize.enabled": humanize}
-    return _act(overrides, named, lambda rt, s: rt.mouse.drag(start_x, start_y, end_x, end_y, s, button=button))
+
+    def action(rt: Runtime, s: Settings, xy: XY) -> dict[str, Any]:
+        sx, sy = xy(start_x, start_y)
+        ex, ey = xy(end_x, end_y)
+        return rt.mouse.drag(sx, sy, ex, ey, s, button=button)
+
+    return _pointer_act(overrides, named, coordinate_space, action)
 
 
 @mcp.tool()
@@ -211,11 +303,17 @@ def scroll(
     y: Annotated[int | None, Field(description="Optionally move here first.")] = None,
     horizontal: bool = False,
     humanize: Humanize = None,
+    coordinate_space: CoordinateSpace = "screenshot",
     overrides: Overrides = None,
 ) -> dict[str, Any]:
     """Scroll the wheel notch by notch in natural flicks (gaps ramp down then up, with regrip pauses)."""
     named = {"humanize.enabled": humanize}
-    return _act(overrides, named, lambda rt, s: rt.mouse.scroll(amount, s, x=x, y=y, horizontal=horizontal))
+
+    def action(rt: Runtime, s: Settings, xy: XY) -> dict[str, Any]:
+        tx, ty = xy(x, y)
+        return rt.mouse.scroll(amount, s, x=tx, y=ty, horizontal=horizontal)
+
+    return _pointer_act(overrides, named, coordinate_space, action)
 
 
 # ------------------------------------------------------------------ keyboard

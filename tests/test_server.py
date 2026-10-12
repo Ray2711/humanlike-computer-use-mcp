@@ -16,7 +16,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ToolError
 
-from humanlike_mcp import server
+from humanlike_mcp import screen, server
 from humanlike_mcp.config import ConfigManager
 from humanlike_mcp.keyboard import Keyboard
 from humanlike_mcp.mouse import Mouse
@@ -123,7 +123,7 @@ def test_action_tools_use_backends(fake_runtime) -> None:
     call("mouse_down", {"button": "right"})
     call("mouse_up", {"button": "right"})
     pos = structured(call("get_cursor_position"))
-    assert set(pos) == {"x", "y"}
+    assert set(pos) == {"x", "y", "screen"}
     assert rt.config.settings.mouse.speed == 1.0  # per-call speed was not persisted
 
 
@@ -186,15 +186,82 @@ def test_screen_tools_in_process(fake_runtime) -> None:
     size = structured(call("get_screen_size"))
     assert size["width"] > 0 and size["height"] > 0 and size["monitors"]
     result = call("screenshot", {"max_width": 320})
-    image, meta = result.content
+    meta, image = result.content
     assert image.type == "image" and image.mime_type == "image/png"
     assert base64.b64decode(image.data).startswith(PNG_MAGIC)
     info = json.loads(meta.text)
     assert info["image_width"] == 320 and info["scale"] >= 1
-    jpeg = call("screenshot", {"monitor": 1, "format": "jpeg", "max_width": 200}).content[0]
+    assert info["image_size"] == f"320x{info['image_height']}"
+    assert info["screen_resolution"] == f"{info['region']['width']}x{info['region']['height']}"
+    assert info["cursor_screen"] == [400, 400]
+    assert "cursor_screenshot" in info
+    assert size["resolution"] == f"{size['width']}x{size['height']}"
+    default = json.loads(call("screenshot").content[0].text)
+    assert default["image_width"] <= server.DEFAULT_SCREENSHOT_WIDTH
+    jpeg = call("screenshot", {"monitor": 1, "format": "jpeg", "max_width": 200}).content[1]
     assert jpeg.mime_type == "image/jpeg"
     with pytest.raises(ToolError, match="monitor"):
         call("screenshot", {"monitor": 99})
+
+
+def _set_view(rt: server.Runtime, left: int = 0, top: int = 0) -> None:
+    rt.view = screen.View(screen.Bounds(left, top, 2560, 1440), 1280, 720)
+
+
+def test_screenshot_coordinates_are_scaled_to_screen(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    _set_view(rt)
+    out = structured(call("click", {"x": 100, "y": 50, "humanize": False}))
+    assert out["coordinate_space"] == "screenshot"
+    assert out["cursor"]["screen"] == [201, 101]
+    assert out["cursor"]["screenshot"] == [100, 50]
+    assert backend.position() == (201, 101)
+
+
+def test_screen_coordinate_space_is_untouched(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    _set_view(rt)
+    out = structured(call("mouse_move", {"x": 300, "y": 200, "humanize": False, "coordinate_space": "screen"}))
+    assert out["coordinate_space"] == "screen" and "note" not in out
+    assert backend.position() == (300, 200)
+    assert out["cursor"]["screenshot"] == [150, 100]
+
+
+def test_without_screenshot_coordinates_fall_back_to_screen(fake_runtime) -> None:
+    _, _, backend = fake_runtime
+    out = structured(call("mouse_move", {"x": 321, "y": 123, "humanize": False}))
+    assert out["coordinate_space"] == "screen" and "screenshot" in out["note"]
+    assert backend.position() == (321, 123)
+    assert "screenshot" not in out["cursor"]
+
+
+def test_drag_and_scroll_use_screenshot_space(fake_runtime) -> None:
+    rt, _, backend = fake_runtime
+    backend._bounds = screen.Bounds(-1920, 0, 4480, 1440)
+    _set_view(rt, left=-1920)
+    out = structured(call("drag", {"start_x": 10, "start_y": 10, "end_x": 640, "end_y": 360, "humanize": False}))
+    assert out["from"] == [-1899, 21] and out["to"] == [-639, 721]
+    call("scroll", {"amount": 1, "x": 1, "y": 1, "humanize": False})
+    assert backend.position() == (-1917, 3)
+
+
+def test_cursor_position_reports_both_spaces(fake_runtime) -> None:
+    rt, _, _ = fake_runtime
+    pos = structured(call("get_cursor_position"))
+    assert pos == {"x": 400, "y": 400, "screen": [400, 400]}
+    _set_view(rt)
+    assert structured(call("get_cursor_position"))["screenshot"] == [200, 200]
+    _set_view(rt, left=5000)
+    assert structured(call("get_cursor_position"))["screenshot"] is None
+
+
+def test_view_mapping_roundtrip() -> None:
+    view = screen.View(screen.Bounds(-1920, 0, 1920, 1080), 1280, 720)
+    for ix, iy in [(0, 0), (639, 359), (1279, 719)]:
+        sx, sy = view.to_screen(ix, iy)
+        assert view.to_image(sx, sy) == (ix, iy)
+    assert view.to_image(0, 0) is None
+    assert view.to_screen(1279, 719) == (-1, 1079)
 
 
 async def _stdio_session(tmp_path: Path) -> dict[str, Any]:
@@ -221,7 +288,7 @@ def test_stdio_server_end_to_end(tmp_path: Path) -> None:
     assert cfg["settings"]["typing"]["wpm"] == {"value": 64.0, "source": "env"}
     size = json.loads(out["size"].content[0].text)
     assert size["width"] > 0
-    image = out["shot"].content[0]
+    image = out["shot"].content[1]
     assert image.type == "image" and base64.b64decode(image.data).startswith(PNG_MAGIC)
-    assert json.loads(out["shot"].content[1].text)["image_width"] == 400
+    assert json.loads(out["shot"].content[0].text)["image_width"] == 400
     assert out["bad"].is_error and "minimum" in out["bad"].content[0].text

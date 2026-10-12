@@ -62,7 +62,7 @@ If a precondition fails, end the tick and change nothing on screen.
 ```
 Iteration:
 - [ ] 1. Read state.md and tasks.md; check STOP, status and budgets
-- [ ] 2. Observe: screenshot {"max_width": 1280}; note scale and region
+- [ ] 2. Observe: screenshot {"max_width": 1280}; read target coordinates from this image
 - [ ] 3. Decide ONE small action toward the current step
 - [ ] 4. Act with one humanlike tool call
 - [ ] 5. Verify: settle-wait (poll wait + small screenshot), then compare with the expectation
@@ -76,7 +76,7 @@ Iteration:
 - If there is no current task, take the first unchecked `- [ ]` item that is eligible: not `@blocked`, and any `@after` time has passed.
 
 **2. Observe.**
-- Call `screenshot {"max_width": 1280}`. Map image points to the screen: `x = region.left + ix * scale`, `y = region.top + iy * scale`, then round.
+- Call `screenshot {"max_width": 1280}`. Pass pixel coordinates from **this image** straight to the mouse tools. They default to `coordinate_space: "screenshot"`, and the server maps them to the screen. Coordinates always refer to the **latest** screenshot, so after a small polling screenshot, take a 1280 px one again before clicking.
 - Write a one-line **screen signature**: the foreground app and window title, plus the key visible text, e.g. `Notepad - todo.txt | caret line 3`.
 - **Allowlist check:** if the foreground app is not in `allowed_apps` and the step does not explicitly require switching to an allowed app, do not act. Escalate.
 

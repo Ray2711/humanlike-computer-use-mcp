@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import io
+import math
 import sys
 import threading
 from dataclasses import dataclass
@@ -82,11 +83,43 @@ def screen_info() -> dict[str, Any]:
     monitors = list_monitors()
     primary = monitors[1] if len(monitors) > 1 else monitors[0]
     return {
+        "resolution": f"{primary.width}x{primary.height}",
         "width": primary.width,
         "height": primary.height,
         "virtual_desktop": monitors[0].as_dict(),
         "monitors": [{"index": i, **m.as_dict()} for i, m in enumerate(monitors[1:], start=1)],
     }
+
+
+@dataclass(frozen=True)
+class View:
+    """Mapping between a screenshot's image pixels and physical screen pixels."""
+
+    region: Bounds
+    width: int
+    height: int
+
+    @property
+    def scale_x(self) -> float:
+        return self.region.width / self.width
+
+    @property
+    def scale_y(self) -> float:
+        return self.region.height / self.height
+
+    def to_screen(self, x: float, y: float) -> tuple[int, int]:
+        """Centre of the screen-pixel block covered by image pixel (x, y)."""
+        return (
+            math.floor(self.region.left + (x + 0.5) * self.scale_x),
+            math.floor(self.region.top + (y + 0.5) * self.scale_y),
+        )
+
+    def to_image(self, x: float, y: float) -> tuple[int, int] | None:
+        ix = math.floor((x - self.region.left) / self.scale_x)
+        iy = math.floor((y - self.region.top) / self.scale_y)
+        if not (0 <= ix < self.width and 0 <= iy < self.height):
+            return None
+        return (ix, iy)
 
 
 @dataclass(frozen=True)
@@ -98,8 +131,14 @@ class Capture:
     region: Bounds
     scale: float
 
+    @property
+    def view(self) -> View:
+        return View(self.region, self.width, self.height)
+
     def metadata(self) -> dict[str, Any]:
         return {
+            "screen_resolution": f"{self.region.width}x{self.region.height}",
+            "image_size": f"{self.width}x{self.height}",
             "image_width": self.width,
             "image_height": self.height,
             "format": self.format,

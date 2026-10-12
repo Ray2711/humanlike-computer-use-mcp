@@ -279,7 +279,7 @@ Restart or reload the MCP server in your client after editing its config.
 
 ## Tool reference
 
-All coordinates are **physical screen pixels**. (0, 0) is the top-left corner of the primary monitor.
+**Coordinates.** By default, mouse tools take **pixel coordinates in the most recent screenshot image**, exactly as the agent sees them (`coordinate_space="screenshot"`). The server converts them to physical screen pixels itself. Pass `coordinate_space="screen"` to use physical screen pixels directly; there (0, 0) is the top-left corner of the primary monitor. Every mouse tool result includes `coordinate_space` and `cursor` (`{"screen": [x, y], "screenshot": [x, y]}`). Before the first screenshot, coordinates are treated as screen pixels, and the result includes a `note` saying so.
 
 **Shared optional arguments on action tools:**
 
@@ -288,6 +288,7 @@ All coordinates are **physical screen pixels**. (0, 0) is the top-left corner of
 | `humanize` (bool) | `false` skips all human-like timing for this call (instant move, no pauses, no typos). |
 | `speed` (number > 0, ≤ 20) | Mouse speed multiplier for this call (`mouse_move`, `click`, `drag`). |
 | `overrides` (object) | Any setting for this call only, by dotted key, e.g. `{"mouse.wind": 6, "click.hold_ms": [90, 130]}`. |
+| `coordinate_space` (`"screenshot"` / `"screen"`) | Mouse tools only. `"screenshot"` (default): x/y are pixels in the latest screenshot. `"screen"`: physical screen pixels. |
 
 Per-call values never persist. Invalid values return a clear error and nothing happens.
 
@@ -295,9 +296,9 @@ Per-call values never persist. Invalid values return a clear error and nothing h
 
 | Tool | Parameters | Returns |
 | --- | --- | --- |
-| `screenshot` | `monitor=0` (0 = all monitors / virtual desktop, 1 = primary, 2… = others), `max_width=None` (downscale to at most this width, ≥ 64), `format="png"` (`png` or `jpeg`), `quality=80` (JPEG only, 1–95) | An image, plus JSON metadata with `image_width`, `image_height`, `region` (left/top/width/height of the captured area in screen pixels), `scale`, and `cursor`. Convert image pixels to screen pixels with `screen_x = region.left + image_x * scale`, and the same for y. |
-| `get_screen_size` | none | `width`/`height` of the primary monitor, `virtual_desktop` bounds, and a `monitors` list with each monitor's bounds |
-| `get_cursor_position` | none | `{"x", "y"}` |
+| `screenshot` | `monitor=1` (1 = primary, 2… = others, 0 = all monitors / virtual desktop), `max_width=1280` (downscale to at most this width, ≥ 64; `null` = full resolution), `format="png"` (`png` or `jpeg`), `quality=80` (JPEG only, 1–95) | JSON metadata first, then the image. The metadata has `screen_resolution` (e.g. `"2560x1440"`), `image_size` (e.g. `"1280x720"`), `image_width`, `image_height`, `region` (the captured area in screen pixels), `scale`, `cursor_screen`, and `cursor_screenshot` (`null` if the cursor is outside the capture). This screenshot becomes the reference for `coordinate_space="screenshot"`. |
+| `get_screen_size` | none | `resolution` (`"WxH"`) and `width`/`height` of the primary monitor, `virtual_desktop` bounds, and a `monitors` list with each monitor's bounds |
+| `get_cursor_position` | none | `x`, `y` and `screen` in screen pixels, plus `screenshot` (image pixels in the latest screenshot, or `null` if the cursor is outside it) |
 
 ### Mouse
 
@@ -487,9 +488,9 @@ Paste-speed typing for one call:
 ## DPI scaling and multiple monitors
 
 - **DPI.** At startup, and before `pyautogui` is imported, the server calls `SetProcessDpiAwareness(2)` (per-monitor DPI aware). Screenshots, cursor positions, and mouse moves then all use **physical pixels**. On a 4K screen at 150% scaling, `get_screen_size` reports 3840×2160, and screenshot pixel (x, y) is screen pixel (x, y) when not downscaled.
-- **Downscaled screenshots.** With `max_width`, multiply image coordinates by the returned `scale` and add `region.left` / `region.top`.
+- **Downscaled screenshots.** Screenshots default to 1280 px wide, because some MCP clients silently shrink larger images, which would make the model's coordinates wrong. With the default `coordinate_space="screenshot"`, the server maps image pixels back to the screen itself. With `coordinate_space="screen"`, use `screen_x = region.left + image_x * scale`, and the same for y.
 - **Multiple monitors.**
-  - `screenshot(monitor=0)` captures the whole virtual desktop, and `region` tells you where it starts. On some layouts that is at negative coordinates.
+  - `screenshot(monitor=0)` captures the whole virtual desktop, and `region` tells you where it starts. On some layouts that is at negative coordinates. Screenshot-space clicks are mapped into whichever monitor or area the latest screenshot captured.
   - `monitor=1` is the primary monitor and `2…` are the others. `get_screen_size` lists every monitor's bounds.
   - Mouse targets can be anywhere on the virtual desktop, including negative coordinates for monitors left of or above the primary.
   - The fail-safe corners are those of the **primary** monitor only.
@@ -557,7 +558,7 @@ At 70 WPM, the median keystroke interval is about 117 ms (10th percentile 72 ms,
 | Symptom | Fix |
 | --- | --- |
 | Tool error "Fail-safe triggered" | The cursor is in a primary-screen corner. Move it away. To disable the fail-safe (not recommended), see [Safety](#safety-and-the-fail-safe). |
-| Clicks land in the wrong place on a scaled display | Make sure you use the screenshot's `scale` and `region` when converting coordinates. The server is DPI aware, so `get_screen_size` should report the physical resolution. If another tool in the same process set DPI awareness first, restart the server. |
+| Clicks land in the wrong place on a scaled display | Pass pixel coordinates from the **latest** screenshot with the default `coordinate_space="screenshot"`, and don't scale them yourself. Check `cursor.screenshot` in the result. Keep `max_width` at 1280 or lower so the client doesn't shrink the image further. The server is DPI aware, so `get_screen_size` should report the physical resolution. If another tool in the same process set DPI awareness first, restart the server. |
 | Nothing happens in an elevated (Administrator) window | Windows blocks input from a normal-privilege process into elevated windows (UIPI). Run the MCP client as Administrator, or avoid elevated targets. |
 | Typing goes to the wrong window | Input goes to the focused window. Click into the target field first. |
 | Wrong characters typed | Characters are resolved for the **active** keyboard layout. Characters missing from it are sent as Unicode, which some apps (games, remote desktops, some terminals) ignore. Typos are simulated with a QWERTY neighbour map whatever the layout. |

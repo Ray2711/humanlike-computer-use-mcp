@@ -37,10 +37,10 @@ Then set `consent: yes`, `consent_given_at`, `status: running` and `session_star
 
 | Tool | Params (defaults) | Loop usage |
 | --- | --- | --- |
-| `screenshot` | `monitor=0`, `max_width=None`, `format="png"`, `quality=80` | Every observe and verify step, with `max_width` 1280. Use `monitor: 1` without `max_width` to read small text. |
-| `get_screen_size` | none | Once per session; record the monitor layout in `last_screenshot_summary` if multi-monitor. |
-| `get_cursor_position` | none | Rarely; the screenshot metadata already includes `cursor`. |
-| `mouse_move` | `x`, `y`, `speed?`, `humanize?`, `overrides?` | Hover menus and tooltips. |
+| `screenshot` | `monitor=1`, `max_width=1280`, `format="png"`, `quality=80` | Every observe and verify step. Metadata comes first: `screen_resolution`, `image_size`, `scale`, `cursor_screen` and `cursor_screenshot`. It becomes the reference for screenshot-space coordinates. Use `max_width: null` only to read tiny text, then take a 1280 px shot again before clicking. |
+| `get_screen_size` | none | Once per session; record `resolution` and the monitor layout in `last_screenshot_summary` if multi-monitor. |
+| `get_cursor_position` | none | Rarely; the screenshot metadata and every mouse result already include the cursor in both spaces. |
+| `mouse_move` | `x`, `y`, `speed?`, `humanize?`, `coordinate_space="screenshot"`, `overrides?` | Hover menus and tooltips. All mouse tools take latest-screenshot pixels by default. |
 | `click` | `x?`, `y?`, `button="left"`, `clicks=1..3`, `speed?`, `humanize?`, `overrides?` | Main pointing action. For tiny targets add `overrides: {"mouse.landing_jitter_px": 0, "mouse.overshoot_enabled": false}`. |
 | `mouse_down` / `mouse_up` | `button`, (`x?`, `y?` on down) | Only for multi-step gestures. Always release. |
 | `drag` | `start_x`, `start_y`, `end_x`, `end_y`, `button`, `speed?`, `humanize?`, `overrides?` | Sliders, selection, drag-and-drop. |
@@ -133,6 +133,7 @@ loop:
 - **"Matches"** means the same screen signature *and* no visible progress indicators (spinners, progress bars, "Loading…", greyed-out panes). A page still painting images or a moving progress bar is not settled, even if the signature is unchanged.
 - Ignore clocks, blinking carets and cursor position when comparing.
 - Use `screenshot_max_width` (1280) or a full-resolution screenshot for the final verify step if you need to read small text. Polls stay small.
+- Every screenshot, including a poll, becomes the reference for screenshot-space mouse coordinates. Never click using coordinates read from an earlier, differently sized screenshot. Take a fresh `screenshot_max_width` screenshot before the next action.
 - Polls are not actions: they don't increment `actions_this_session` or `same_signature_count`, and they get one journal line in total (e.g. `settled after 3 polls / 3.5 s`), not one per poll.
 
 **Recommended settle timeouts:**

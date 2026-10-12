@@ -355,8 +355,8 @@ After the client has (re)loaded the server:
 
 1. **Tools appear.** The client lists 18 tools from `humanlike-computer-use`. Cursor shows a green status in Settings → MCP; Claude Code's `/mcp` lists the server as connected.
 2. **Call `get_config`.** It returns `preset`, `config_file` and `settings`, and each setting has a `value` and a `source`. Check that the preset, and any env or file values, show the expected source (`env`, `file:<path>`, `preset:<name>`).
-3. **Call `get_screen_size`.** It returns `width`/`height` of the primary monitor in physical pixels (e.g. 3840×2160 on a 4K screen with 150% scaling), plus `virtual_desktop` and `monitors`.
-4. **Call `screenshot` with `{"max_width": 1024}`.** It returns an image and JSON with `image_width`, `scale` and `region`. On macOS, a black or wallpaper-only image means Screen Recording permission is missing.
+3. **Call `get_screen_size`.** It returns `resolution` and `width`/`height` of the primary monitor in physical pixels (e.g. `"3840x2160"` on a 4K screen with 150% scaling), plus `virtual_desktop` and `monitors`.
+4. **Call `screenshot` with no arguments.** It returns JSON first, then a 1280 px wide image of the primary monitor. The JSON includes `screen_resolution`, `image_size`, `scale`, `cursor_screen` and `cursor_screenshot`. On macOS, a black or wallpaper-only image means Screen Recording permission is missing.
 
 All three calls only read state. **Stop here.** Do not test `mouse_move`, `click`, `type_text`, etc. unless the user explicitly asks; if they do, warn them first and use a harmless target.
 
@@ -373,7 +373,8 @@ All three calls only read state. **Stop here.** Do not test `mouse_move`, `click
 | JSON parse error after editing a client config | Unescaped Windows backslashes or a trailing comma | Use `\\` or `/` in paths; validate with `python -c "import json;json.load(open(r'<path>'))"` |
 | Tools don't appear in Claude Desktop | App not fully restarted | Quit from the tray or menu bar and relaunch |
 | Tool error "Fail-safe triggered…" | Cursor is in a corner of the primary screen | Move the cursor away from the corner; then retry |
-| Clicks land in the wrong place | Image coordinates used without scaling | Use `screen = region.left + image_x * scale` (see [agent-usage.md](agent-usage.md)) |
+| Clicks land in the wrong place | Coordinates read from an older or differently sized screenshot, scaled twice by hand, or `coordinate_space: "screen"` passed with image pixels | Take a fresh `screenshot` and pass its image pixels as-is with the default `coordinate_space: "screenshot"`. Check `cursor.screenshot` in the result (see [agent-usage.md](agent-usage.md)) |
+| Model's coordinates are off by a constant factor | The client downscaled a large screenshot before the model saw it | Keep `max_width` at the 1280 default or lower |
 | Nothing happens in an Administrator window (Windows) | UIPI blocks input from non-elevated processes | Run the client elevated, or avoid elevated windows |
 | macOS: input ignored, or blank screenshots | Missing Accessibility or Screen Recording permission for the launching app | Grant both in System Settings → Privacy & Security, then restart the app |
 | Linux: black screenshots, no input | Wayland session | Use an X11/Xorg session |

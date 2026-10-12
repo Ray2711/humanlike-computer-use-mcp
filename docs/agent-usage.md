@@ -9,7 +9,7 @@ How an AI agent should **use** this server's tools effectively and safely. For i
 ## 1. The core loop: look, then act, then look again
 
 1. `screenshot`: see the current state.
-2. Pick a target in **image** pixels and convert it to **screen** pixels (section 2).
+2. Pick a target in **image** pixels and pass it to the mouse tool unchanged (section 2).
 3. Act: `click`, `type_text`, `hotkey`, `scroll`, …
 4. `wait` briefly if the UI needs time (page loads, animations), then `screenshot` again to confirm the result before the next step.
 
@@ -21,46 +21,43 @@ How an AI agent should **use** this server's tools effectively and safely. For i
 
 ---
 
-## 2. Screenshot to screen coordinates
+## 2. Coordinates: click what you see
 
-`screenshot` returns two content items: the **image**, and a **JSON text** block like this:
+`screenshot` defaults to the **primary monitor** (`monitor=1`), downscaled to **1280 px wide** (`max_width=1280`). It returns two content items: first a **JSON text** block, then the **image**:
 
 ```json
 {
+  "screen_resolution": "1920x1080",
+  "image_size": "1280x720",
   "image_width": 1280,
   "image_height": 720,
   "format": "png",
   "region": {"left": 0, "top": 0, "width": 1920, "height": 1080},
   "scale": 1.5,
   "to_screen": "screen_x = region.left + image_x * scale; screen_y = region.top + image_y * scale",
-  "cursor": [961, 540]
+  "cursor_screen": [961, 540],
+  "cursor_screenshot": [640, 360],
+  "coordinates": "Mouse tools take pixel coordinates in this image by default; ..."
 }
 ```
 
-**Always convert before clicking:**
+**Pass image pixel coordinates straight to the mouse tools.** `click`, `mouse_move`, `mouse_down`, `drag` and `scroll` default to `coordinate_space: "screenshot"`. The server converts the coordinates to real screen pixels using the **most recent** screenshot, so you never scale anything yourself.
 
-```
-screen_x = region.left + image_x * scale
-screen_y = region.top  + image_y * scale
-```
-
-Round the results to integers.
-
-- **`scale`** is `1.0` when the image isn't downscaled. With `max_width`, the image is shrunk proportionally and `scale = original_width / max_width`.
-- **`region`** is the captured area in screen pixels.
-  - With `monitor=0` (the default, all monitors), `region.left` / `region.top` can be **negative**, for example when a second monitor sits left of the primary.
-  - With `monitor=1`, it's the primary monitor, whose origin is (0, 0).
-- **`cursor`** is the current mouse position in *screen* pixels, which is handy for sanity checks.
+- **Coordinates always refer to the latest screenshot.** Every `screenshot` call, including small polling shots (e.g. `max_width: 640`), replaces the mapping. Read coordinates from the screenshot you just took, not an older one.
+- **Every mouse result includes `cursor`** with `screen` and `screenshot` positions, so you can check where the pointer landed in the image you're looking at. `cursor.screenshot` is `null` when the cursor is outside the captured area (e.g. on another monitor).
+- **Before any screenshot,** coordinates are treated as screen pixels, and the result carries a `note` saying so. Take a screenshot first.
+- **`coordinate_space: "screen"`** takes physical screen pixels instead. (0, 0) is the primary monitor's top-left corner, other monitors can be negative, and the conversion is `screen_x = region.left + image_x * scale`. Use it only when you already have screen pixels, e.g. from `get_screen_size` or `get_cursor_position`.
 - Coordinates are **physical pixels**. The server is DPI aware, so don't apply Windows display scaling (125% / 150%) yourself.
+- **`get_cursor_position`** returns `x`/`y` (screen) plus `screen` and, after a screenshot, `screenshot` positions. **`get_screen_size`** returns `resolution` (e.g. `"2560x1440"`) and every monitor's bounds.
 
-**Choosing `max_width`:**
+**Choosing screenshot options:**
 
-- 1280–1600 is a good balance of legibility and payload size for full-HD and larger screens.
-- Go smaller (e.g. 1024) for quick "did it work?" checks.
+- Keep the default 1280 px width. Some clients silently downscale larger images before the model sees them, which breaks coordinates. Avoid going above about 1500 px.
+- Go smaller (e.g. 640–1024) for quick "did it work?" checks, but take a normal screenshot again before clicking anything.
 - Use `format: "jpeg"` (with `quality` around 70–80) to shrink payloads further. Use PNG when you need to read small text.
-- To read a specific monitor at full detail, use `monitor: 2` (etc.) without `max_width`. Call `get_screen_size` to list monitors and their bounds.
+- Other monitors: `monitor: 2` (etc.), or `monitor: 0` for the whole virtual desktop. Clicks then map into that monitor automatically.
 
-**Worked example.** The screenshot was taken with `max_width: 1280` on a 1920×1080 primary monitor (`scale` 1.5, `region` origin (0, 0)). A button appears at image (400, 300), so you click screen (0 + 400×1.5, 0 + 300×1.5) = **(600, 450)**.
+**Worked example.** The primary monitor is 1920×1080, and the default screenshot is 1280×720. A button appears at image (400, 300), so you call `click {"x": 400, "y": 300}`. The server clicks screen (600, 450), and the result reports `cursor.screenshot ≈ [400, 300]`.
 
 ---
 
