@@ -1,0 +1,63 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+wheels/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Test and tool caches
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.*
+
+# User-local configuration (machine-specific paths, possible tokens)
+humanlike.toml
+.cursor/mcp.json
+
+# Logs, screenshots, recordings
+*.log
+screenshots/
+recordings/
+output/
+
+# continuous-computer-use skill kill switch (runtime only)
+.cursor/skills/continuous-computer-use/STOP
+# Live per-user queue and state; created from the tracked *.template.md files
+.cursor/skills/continuous-computer-use/state.md
+.cursor/skills/continuous-computer-use/tasks.md

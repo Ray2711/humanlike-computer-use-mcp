@@ -1,0 +1,69 @@
+# Example configuration for humanlike-computer-use-mcp.
+#
+# Copy to ./humanlike.toml (in the server's working directory) or point HUMANLIKE_CONFIG at it.
+# Every value below is the built-in "natural" default, so you only need to keep the lines you change.
+#
+# Layering (later wins): defaults < preset < this file < env vars (HUMANLIKE_SECTION__KEY)
+#                        < runtime set_config < per-call tool arguments.
+# Ranges are [min, max]; values are drawn from a Gaussian centred in the range and truncated to it.
+
+# natural | careful | fast | instant
+preset = "natural"
+
+[humanize]
+enabled = true                   # master switch; false = instant moves, no delays, no typos
+
+[mouse]
+gravity = 9.0                    # WindMouse pull toward the target
+wind = 3.0                       # WindMouse random "wind" (path wobble/curvature)
+max_step = 15.0                  # max px per step for a 500 px move (scaled by (distance/500)^0.7, clamped 0.45-3x)
+damped_distance = 12.0           # px from the target where wind dies down and steps shrink (scaled with max_step)
+tick_delay = 0.012               # seconds between path points (redistributed by the speed profile)
+speed = 1.0                      # overall speed multiplier
+ease = true                      # bell-shaped speed profile: accelerate, peak, decelerate into the target
+arc_strength = 0.04              # sideways arc amplitude ~ N(0, arc_strength * distance); 0 = straight-ish
+overshoot_enabled = true
+overshoot_min_distance = 300.0   # only moves at least this long can overshoot
+overshoot_probability = 0.3
+overshoot_max_px = 25.0          # how far past the target an overshoot may go
+landing_jitter_px = 2.0          # final position lands within this radius of the target
+
+[click]
+hold_ms = [60, 140]              # button press duration
+pre_click_pause_ms = [50, 250]   # hesitation between arriving and pressing
+double_click_gap_ms = [80, 180]  # gap between clicks of a double/triple click
+
+[drag]
+pre_move_hold_ms = [80, 200]     # hold still after pressing before moving
+release_dwell_ms = [60, 180]     # settle at the destination before releasing
+speed_factor = 0.7               # drags move slower than free movement
+
+[scroll]
+tick_gap_ms = [20, 90]           # gap between wheel notches within a flick
+ramp = true                      # gaps start long, shorten, then lengthen within a flick
+flick_notches = [3, 6]           # notches per finger flick
+regrip_pause_ms = [150, 400]     # pause between flicks
+
+[typing]
+wpm = 70.0                       # target words per minute (5 chars/word), pauses and typos included
+wpm_variance = 0.25              # log-normal sigma of per-key interval noise
+key_hold_ms = [30, 90]
+bigram_speedup = 0.8             # common letter pairs take 80% of the normal interval
+shift_extra_ms = [40, 90]        # Shift goes down this long before the shifted key
+space_pause_ms = [80, 250]       # extra pause before starting a new word
+punctuation_pause_ms = [150, 450]
+newline_pause_ms = [300, 800]
+think_pause_probability = 0.03   # chance of a longer pause at a word boundary
+think_pause_ms = [400, 1500]
+typo_rate = 0.02                 # chance per key of a neighbouring-key typo (corrected with Backspace)
+typo_notice_ms = [200, 600]      # delay before noticing a typo
+layout = "qwerty"
+
+[keys]
+modifier_gap_ms = [20, 60]       # stagger between keys of a hotkey (press and release)
+key_hold_ms = [40, 100]          # hold time for press_key / hotkey
+repeat_gap_ms = [60, 160]        # gap between repeated press_key presses
+
+[safety]
+failsafe = true                  # cursor in a primary-screen corner aborts all input
+max_text_length = 10000          # type_text refuses longer text
